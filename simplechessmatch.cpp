@@ -5,6 +5,11 @@ namespace po = boost::program_options;
 struct options_info options;
 MatchManager match_mgr;
 
+// Helper function to convert elo to expected score
+double elo_to_score(double elo) {
+    return 1.0 / (1.0 + pow(10.0, -elo / 400.0));
+}
+
 int main(int argc, char* argv[])
 {
    cout << "simplechessmatch\n";
@@ -47,7 +52,7 @@ int main(int argc, char* argv[])
    match_mgr.main_loop();
 
    match_mgr.shut_down_all_engines();
-   match_mgr.print_results();
+   match_mgr.print_results(); // Final print
    match_mgr.save_pgn();
 
    match_mgr.cleanup();
@@ -63,6 +68,9 @@ MatchManager::MatchManager(void)
    m_engines_shut_down = false;
    m_game_mgr = nullptr;
    m_thread = nullptr;
+   m_sprt_enabled = false;
+   m_sprt_test_finished = false;
+   m_sprt_llr = 0.0;
 }
 
 MatchManager::~MatchManager(void)
@@ -90,7 +98,6 @@ void MatchManager::main_loop(void)
    bool swap_sides = false;
 
 #if defined(WIN32) || defined(__linux__)
-   // _kbhit is used to detect keypress
    cout << "\n***** Press any key to exit and terminate match *****\n\n";
 #else
    cout << "\n***** Press Ctrl-C to exit and terminate match *****\n\n";
@@ -109,38 +116,55 @@ void MatchManager::main_loop(void)
 
             if (!swap_sides)
                if (get_next_fen(fen) == 0)
-                  return;
+               {
+                  // If we run out of FENs but not games, stop the match
+                  options.num_games_to_play = m_total_games_started;
+                  break; 
+               }
             m_game_mgr[i].m_fen = fen;
             m_game_mgr[i].m_swap_sides = swap_sides;
             swap_sides = !swap_sides;
 
-            // cout << "Starting thread " << i << ", swap: " << m_game_mgr[i].m_swap_sides << ", FEN: [" << m_game_mgr[i].m_fen << "]\n";
             m_game_mgr[i].m_thread_running = true;
             m_thread[i] = thread(&GameManager::game_runner, &m_game_mgr[i]);
             m_total_games_started++;
          }
       }
-      while (!new_game_can_start() && !match_completed())
+
+      // This loop waits for threads to finish and prints updates
+      bool all_threads_busy_or_match_done = !new_game_can_start() || (m_total_games_started >= options.num_games_to_play);
+      while (all_threads_busy_or_match_done && !match_completed())
       {
-         this_thread::sleep_for(200ms);
+         this_thread::sleep_for(500ms);
          print_results();
          save_pgn();
          if (_kbhit())
+         {
+            cout << "\nKey pressed, terminating match.\n";
             return;
+         }
          for (uint i = 0; i < options.num_threads; i++)
             if (m_game_mgr[i].m_engine_disconnected || m_game_mgr[i].is_engine_unresponsive() || (!options.continue_on_error && m_game_mgr[i].m_error))
                return;
+        
+         // Re-check condition to break out of this waiting loop
+         all_threads_busy_or_match_done = !new_game_can_start() || (m_total_games_started >= options.num_games_to_play);
       }
+      // Brief sleep in the outer loop to avoid busy-waiting when threads are finishing
+      this_thread::sleep_for(50ms);
    }
 }
 
 bool MatchManager::match_completed(void)
 {
+   if (m_sprt_enabled && m_sprt_test_finished)
+      return (num_games_in_progress() == 0);
    return ((m_total_games_started >= options.num_games_to_play) && (num_games_in_progress() == 0));
 }
 
 bool MatchManager::new_game_can_start(void)
 {
+   if (m_sprt_enabled && m_sprt_test_finished) return false;
    return ((m_total_games_started < options.num_games_to_play) && (num_games_in_progress() < options.num_threads));
 }
 
@@ -159,6 +183,21 @@ int MatchManager::initialize(void)
    {
       cout << "Error: must specify two engines\n";
       return 0;
+   }
+
+   m_sprt_enabled = options.sprt_enabled;
+   if (m_sprt_enabled) {
+       m_sprt_elo0 = options.sprt_elo0;
+       m_sprt_elo1 = options.sprt_elo1;
+       m_sprt_alpha = options.sprt_alpha;
+       m_sprt_beta = options.sprt_beta;
+       m_sprt_lower_bound = log(m_sprt_beta / (1.0 - m_sprt_alpha));
+       m_sprt_upper_bound = log((1.0 - m_sprt_beta) / m_sprt_alpha);
+       m_sprt_llr = 0.0;
+       m_sprt_test_finished = false;
+       cout << "SPRT test enabled with elo0=" << m_sprt_elo0 << ", elo1=" << m_sprt_elo1
+            << ", alpha=" << m_sprt_alpha << ", beta=" << m_sprt_beta << "\n";
+       cout << "SPRT bounds: [" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << "]\n";
    }
 
    if (!options.fens_filename.empty())
@@ -286,12 +325,12 @@ void MatchManager::send_engine_custom_commands(Engine *engine)
 {
    if (engine->m_number == FIRST)
    {
-      for (int i = 0; i < options.custom_commands_1.size(); i++)
+      for (size_t i = 0; i < options.custom_commands_1.size(); i++)
          engine->send_engine_cmd(options.custom_commands_1[i]);
    }
    else
    {
-      for (int i = 0; i < options.custom_commands_2.size(); i++)
+      for (size_t i = 0; i < options.custom_commands_2.size(); i++)
          engine->send_engine_cmd(options.custom_commands_2[i]);
    }
 }
@@ -300,13 +339,6 @@ void MatchManager::print_results(void)
 {
    uint engine1_wins, engine2_wins, draws, illegal_move_games, engine1_losses_on_time, engine2_losses_on_time;
    engine1_wins = engine2_wins = draws = illegal_move_games = engine1_losses_on_time = engine2_losses_on_time = 0;
-
-   // don't print results again unless the total number of games completed has changed.
-   static int last_total_games_completed = 0;
-   int total_games_completed = m_total_games_started - num_games_in_progress();
-   if (total_games_completed == last_total_games_completed)
-      return;
-   last_total_games_completed = total_games_completed;
 
    for (uint i = 0; i < options.num_threads; i++)
    {
@@ -317,22 +349,126 @@ void MatchManager::print_results(void)
       engine1_losses_on_time += m_game_mgr[i].m_engine1_losses_on_time;
       engine2_losses_on_time += m_game_mgr[i].m_engine2_losses_on_time;
    }
+   
+   int N = engine1_wins + engine2_wins + draws;
 
-   double engine1_score = ((double)engine1_wins + (double)draws / 2.0) / (double)(engine1_wins + engine2_wins + draws);
-   double engine2_score = 1.0 - engine1_score;
-   double elo_diff = log10(1.0 / engine1_score - 1.0) * 400.0;
+   static int last_total_games_completed = -1;
+   int total_games_completed = m_total_games_started - num_games_in_progress();
+   if (total_games_completed == last_total_games_completed && N > 0)
+      return;
+   last_total_games_completed = total_games_completed;
 
+   // Update SPRT
+   if (m_sprt_enabled && !m_sprt_test_finished && N > 0) {
+       // Probabilities under H0 (elo = elo0)
+       double E0 = elo_to_score(m_sprt_elo0);
+       // Probabilities under H1 (elo = elo1)
+       double E1 = elo_to_score(m_sprt_elo1);
+
+       // Estimate the probability of a draw from the match data.
+       // Add a small epsilon to avoid division by zero or log(0) if N=0 or draws=0
+       double P_draw = (double)draws / N;
+
+       // Probabilities of win, loss, draw for H0
+       double w0 = E0 - P_draw / 2.0;
+       double l0 = 1.0 - E0 - P_draw / 2.0;
+       double d0 = P_draw;
+
+       // Probabilities of win, loss, draw for H1
+       double w1 = E1 - P_draw / 2.0;
+       double l1 = 1.0 - E1 - P_draw / 2.0;
+       double d1 = P_draw;
+
+       // To avoid log(0) for w,l in case of 100% draw rate
+       if (w0 <= 0) w0 = 1e-9;
+       if (l0 <= 0) l0 = 1e-9;
+       if (w1 <= 0) w1 = 1e-9;
+       if (l1 <= 0) l1 = 1e-9;
+
+       // Use the correct trinomial LLR formula.
+       // We can ignore the draw term if we assume P(draw) is independent of elo, because log(d1/d0) = log(P_draw/P_draw) = log(1) = 0.
+       // This is a common and safe assumption for small elo differences.
+       m_sprt_llr = (double)engine1_wins * log(w1 / w0) +
+                    (double)engine2_wins * log(l1 / l0);
+       // The full formula would be:
+       // m_sprt_llr = (double)engine1_wins * log(w1 / w0) +
+       //              (double)engine2_wins * log(l1 / l0) +
+       //              (double)draws * log(d1 / d0); // This term is 0 with our assumption.
+
+       if (m_sprt_llr > m_sprt_upper_bound) {
+           m_sprt_test_finished = true;
+       } else if (m_sprt_llr < m_sprt_lower_bound) {
+           m_sprt_test_finished = true;
+       }
+   }
+   
+   // --- Clear screen and print new stats ---
+#ifdef WIN32
+   system("cls");
+#else
+   cout << "\033[2J\033[1;1H";
+#endif
+
+   cout << "Engine1: " << options.engine_file_name_1 << " vs Engine2: " << options.engine_file_name_2 << "\n\n";
+
+   if (N == 0) {
+       cout << "No games completed yet." << endl;
+       return;
+   }
+   
+   double score = (double)(engine1_wins + (double)draws / 2.0) / N;
+   
+   cout << fixed << setprecision(2);
+   
+   // Elo
+   if (score <= 1e-9 || score >= 1.0 - 1e-9) {
+       cout << "Elo   | " << (score > 0.5 ? "+inf" : "-inf") << endl;
+   } else {
+       double elo_diff = -400.0 * log10(1.0 / score - 1.0);
+       double win_frac = (double)engine1_wins / N;
+       double draw_frac = (double)draws / N;
+       double variance_of_score = (win_frac + 0.25 * draw_frac - score * score);
+       double std_error_of_mean_score = sqrt(variance_of_score / N);
+       double elo_per_score = 400.0 / (score * (1.0 - score) * log(10.0));
+       double std_error_of_elo = elo_per_score * std_error_of_mean_score;
+       double elo_margin = 1.96 * std_error_of_elo;
+       cout << "Elo   | " << elo_diff << " +- " << elo_margin << " (95%)" << endl;
+   }
+   
+   // SPRT
+   if (m_sprt_enabled) {
+      stringstream tc_ss;
+      if (options.tc_fixed_time_move_ms > 0) {
+          tc_ss << fixed << setprecision(2) << (float)options.tc_fixed_time_move_ms / 1000.0 << "s";
+      } else {
+          tc_ss << options.tc_ms / 1000 << "+" << fixed << setprecision(2) << (float)options.tc_inc_ms / 1000.0;
+      }
+      string tc_str = tc_ss.str();
+      
+      cout << "SPRT  | " << options.sprt_elo1 << " " << tc_str << " Threads=" << options.num_threads << " Hash=" << options.mem_size_1 << "MB" << endl;
+      cout << "LLR   | " << m_sprt_llr << " (" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << ") [" 
+           << m_sprt_elo0 << ", " << m_sprt_elo1 << "]" << endl;
+   }
+   
+   // Games
+   cout << "Games | N: " << N << " W: " << engine1_wins << " L: " << engine2_wins << " D: " << draws << endl;
+   
+   // Other info
    stringstream ss;
    if (illegal_move_games != 0)
-      ss << "  [games ending in illegal move: " << illegal_move_games << "]";
+      ss << "  [Illegal Moves: " << illegal_move_games << "]";
    if ((engine1_losses_on_time != 0) || (engine2_losses_on_time != 0))
-      ss << "  [losses on time: " << engine1_losses_on_time << " / " << engine2_losses_on_time <<  "]";
+      ss << "  [Timeouts: " << engine1_losses_on_time << " / " << engine2_losses_on_time <<  "]";
+   if (ss.str().length() > 0)
+      cout << "Info  |" << ss.str() << endl;
 
-   cout << setprecision(4);
-   cout << "Engine1 (" << options.engine_file_name_1 << "): " << engine1_wins << " wins. Engine2 (" << options.engine_file_name_2 << "): " << engine2_wins <<  " wins.  "
-        << draws << " draws.  " << 100.0 * engine1_score << "% - " << 100.0 * engine2_score << "%  elo " << (elo_diff >= 0.0 ? "+" : "") << elo_diff << ss.str() << "\n";
-
-   return;
+   if (m_sprt_enabled && m_sprt_test_finished) {
+        cout << "\nSPRT test finished: ";
+        if(m_sprt_llr >= m_sprt_upper_bound)
+            cout << "H1 accepted (engine 1 is stronger)." << endl;
+        else
+            cout << "H0 accepted (elo is within bounds)." << endl;
+   }
 }
 
 int MatchManager::get_next_fen(string &fen)
@@ -343,7 +479,7 @@ int MatchManager::get_next_fen(string &fen)
       return 1;
    }
    getline(m_FENs_file, fen);
-   if (fen.empty())
+   if (m_FENs_file.eof() && fen.empty())
    {
       cout << "Used all FENs.\n";
       return 0;
@@ -403,6 +539,12 @@ int parse_cmd_line_options(int argc, char* argv[])
          ("pmoves",     "print out all moves")
          ("pgn",        po::value<string>(&options.pgn_filename), "save games in PGN format to specified file name\n(if file exists it will be overwritten)")
          ("pgn4",       po::value<string>(&options.pgn4_filename), "save games in PGN4 format to specified file name\n(if file exists it will be overwritten)")
+         // SPRT options
+         ("sprt", "Enable SPRT test. Test stops when bounds are reached.")
+         ("sprt-elo0", po::value<double>(&options.sprt_elo0)->default_value(0.0), "SPRT H0 (null hypothesis) Elo.")
+         ("sprt-elo1", po::value<double>(&options.sprt_elo1)->default_value(5.0), "SPRT H1 (alternative hypothesis) Elo.")
+         ("sprt-alpha", po::value<double>(&options.sprt_alpha)->default_value(0.05), "SPRT alpha (type I error).")
+         ("sprt-beta", po::value<double>(&options.sprt_beta)->default_value(0.05), "SPRT beta (type II error).")
          ;
 
       po::variables_map var_map;
@@ -424,6 +566,7 @@ int parse_cmd_line_options(int argc, char* argv[])
       options.fourplayerchess = (var_map.count("4pc") != 0);
       options.early_win = (var_map.count("earlywin") != 0);
       options.early_draw = (var_map.count("earlydraw") != 0);
+      options.sprt_enabled = (var_map.count("sprt") != 0);
    }
    catch (exception &e)
    {

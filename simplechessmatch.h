@@ -1,8 +1,9 @@
 #include "gamemanager.h"
 #include <boost/program_options.hpp>
 #include <fstream>
-#include <math.h>
+#include <cmath>
 #include <iomanip>
+#include <algorithm> // For std::max
 #ifdef WIN32
 #include <conio.h>
 #else
@@ -33,6 +34,17 @@ private:
    bool m_engines_shut_down;
    fstream m_FENs_file;
    fstream m_pgn_file;
+
+   // SPRT related members
+   bool m_sprt_enabled;
+   double m_sprt_elo0;
+   double m_sprt_elo1;
+   double m_sprt_alpha;
+   double m_sprt_beta;
+   double m_sprt_lower_bound;
+   double m_sprt_upper_bound;
+   double m_sprt_llr;
+   bool m_sprt_test_finished;
 
 public:
    MatchManager(void);
