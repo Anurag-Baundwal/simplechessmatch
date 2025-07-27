@@ -152,6 +152,16 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          }
          if (white_engine->m_move.empty())
             break; // no legal moves
+
+         // --- MODIFIED PONDER LOGIC FOR WHITE TEAM (Red/Yellow) ---
+         // Check if the engine that just moved should ponder.
+         bool is_engine1_turn = (white_engine == &m_engine1);
+         if ((is_engine1_turn && options.ponder1) || (!is_engine1_turn && options.ponder2))
+         {
+            white_engine->do_ponder_search(fixed_time_ms);
+         }
+         // --- END MODIFIED LOGIC ---
+
          elapsed_time_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - m_timestamp);
          m_white_clock_ms = m_white_clock_ms - elapsed_time_ms;
          if (m_white_clock_ms.count() < (0 - (int)options.margin_ms))
@@ -180,6 +190,16 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          }
          if (black_engine->m_move.empty())
             break; // no legal moves
+
+         // --- MODIFIED PONDER LOGIC FOR BLACK TEAM (Blue/Green) ---
+         // Check if the engine that just moved should ponder.
+         bool is_engine1_turn = (black_engine == &m_engine1);
+         if ((is_engine1_turn && options.ponder1) || (!is_engine1_turn && options.ponder2))
+         {
+             black_engine->do_ponder_search(fixed_time_ms);
+         }
+         // --- END MODIFIED LOGIC ---
+
          elapsed_time_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - m_timestamp);
          m_black_clock_ms = m_black_clock_ms - elapsed_time_ms;
          if (m_black_clock_ms.count() < (0 - (int)options.margin_ms))

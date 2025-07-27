@@ -661,6 +661,34 @@ void Engine::xb_edit_board(const string &fen)
    send_engine_cmd(".");
 }
 
+void Engine::do_ponder_search(chrono::milliseconds ponder_time_ms)
+{
+   if (ponder_time_ms.count() <= 0)
+      return;
+
+   // This sequential pondering logic is only implemented for UCI protocol
+   // as it's the modern standard and what your engine uses.
+   if (m_uci)
+   {
+      if (m_debug)
+         cout << "ENGINE " << m_ID << " PONDERING for " << ponder_time_ms.count() << "ms...\n";
+
+      // Tell the engine to think for the given time
+      send_engine_cmd("go movetime " + to_string(ponder_time_ms.count()));
+
+      // Wait for the ponder time to elapse
+      this_thread::sleep_for(ponder_time_ms);
+
+      // Stop the search cleanly. The engine will have populated its TT.
+      send_engine_cmd("stop");
+
+      // Wait for the "readyok" confirmation. This is important as it also
+      // consumes any leftover 'info' or 'bestmove' lines from the ponder search,
+      // preventing them from interfering with the next real search.
+      wait_for_ready(false);
+   }
+}
+
 void rstrip(string &s)
 {
    // if string is null terminated before the end of the string, truncate the string.

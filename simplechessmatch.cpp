@@ -521,6 +521,8 @@ int parse_cmd_line_options(int argc, char* argv[])
          ("custom2",    po::value<vector<string>>(&options.custom_commands_2), "second engine custom command. Note: --custom1 and --custom2 can be used more than once in the command line.")
          ("debug1",     "enable debug for first engine")
          ("debug2",     "enable debug for second engine")
+         ("ponder1",    "enable extra ponder time for engine 1") // <-- NEW
+         ("ponder2",    "enable extra ponder time for engine 2") // <-- NEW
          ("tc",         po::value<uint>(&options.tc_ms)->default_value(10000), "time control base time (ms)")
          ("inc",        po::value<uint>(&options.tc_inc_ms)->default_value(100), "time control increment (ms)")
          ("fixed",      po::value<uint>(&options.tc_fixed_time_move_ms)->default_value(0), "time control fixed time per move (ms). This must be set to 0, unless engines should simply use a fixed amount of time per move.")
@@ -561,6 +563,8 @@ int parse_cmd_line_options(int argc, char* argv[])
       options.uci_2 = (var_map.count("x2") == 0);
       options.debug_1 = (var_map.count("debug1") != 0);
       options.debug_2 = (var_map.count("debug2") != 0);
+      options.ponder1 = (var_map.count("ponder1") != 0); // <-- NEW
+      options.ponder2 = (var_map.count("ponder2") != 0); // <-- NEW
       options.continue_on_error = (var_map.count("continue") != 0);
       options.print_moves = (var_map.count("pmoves") != 0);
       options.fourplayerchess = (var_map.count("4pc") != 0);

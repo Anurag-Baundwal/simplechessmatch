@@ -4,6 +4,7 @@
 #include <vector>
 #include <cctype>
 #include <sstream>
+#include <chrono> // Added for milliseconds
 
 #define ABS(a)                (((a) > 0) ? (a) : (0 - (a)))
 
@@ -102,6 +103,7 @@ public:
    void update_game_result(void);
    string get_eval(void);
    void xb_edit_board(const string &fen);
+   void do_ponder_search(chrono::milliseconds ponder_time_ms); // <-- NEW FUNCTION
 
 private:
    int readline(void);
@@ -123,6 +125,8 @@ struct options_info
    vector<string> custom_commands_2;
    bool debug_1;
    bool debug_2;
+   bool ponder1; // <-- NEW
+   bool ponder2; // <-- NEW
 
    bool print_moves;
    bool continue_on_error;
