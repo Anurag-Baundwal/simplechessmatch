@@ -3,7 +3,9 @@
 #include <fstream>
 #include <cmath>
 #include <iomanip>
-#include <algorithm> // For std::max
+#include <algorithm> // For std::sort, std::set_difference, std::shuffle
+#include <random>    // For std::default_random_engine, std::random_device
+#include <mutex>     // For std::mutex
 #ifdef WIN32
 #include <conio.h>
 #else
@@ -35,6 +37,15 @@ private:
    fstream m_FENs_file;
    fstream m_pgn_file;
 
+   // Core management
+   vector<int> m_available_physical_p_cores;
+   vector<int> m_available_logical_p_cores;
+   vector<int> m_available_e_cores;
+   vector<int> m_available_generic_cores;
+   vector<int> m_p_core_list; // Master list of all P-cores
+   vector<int> m_e_core_list; // Master list of all E-cores
+   mutex m_core_mutex;
+
    // SPRT related members
    bool m_sprt_enabled;
    double m_sprt_elo0;
@@ -64,4 +75,7 @@ private:
    bool new_game_can_start(void);
    uint num_games_in_progress(void);
    int get_next_fen(string &fen);
+   void parse_core_list(const string& core_str, vector<int>& core_vec);
+   void return_cores_to_pool(const string& core_list_str);
+   bool allocate_cores_for_game(string& core_list_1, string& core_list_2);
 };

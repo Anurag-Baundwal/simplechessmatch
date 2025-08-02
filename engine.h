@@ -83,6 +83,7 @@ public:
    Engine(void);
    ~Engine(void);
    int load_engine(const string &eng_file_name, int ID, engine_number engine_num, bool uci);
+   void set_affinity(const string &core_list);
    void send_engine_cmd(const string &cmd);
    void send_quit_cmd(void);
    int get_engine_move(void);
@@ -103,7 +104,7 @@ public:
    void update_game_result(void);
    string get_eval(void);
    void xb_edit_board(const string &fen);
-   void do_ponder_search(chrono::milliseconds ponder_time_ms); // <-- NEW FUNCTION
+   void do_ponder_search(chrono::milliseconds ponder_time_ms);
 
 private:
    int readline(void);
@@ -123,10 +124,12 @@ struct options_info
    uint mem_size_2;
    vector<string> custom_commands_1;
    vector<string> custom_commands_2;
+   string pcores;
+   string ecores;
    bool debug_1;
    bool debug_2;
-   bool ponder1; // <-- NEW
-   bool ponder2; // <-- NEW
+   bool ponder1;
+   bool ponder2;
 
    bool print_moves;
    bool continue_on_error;

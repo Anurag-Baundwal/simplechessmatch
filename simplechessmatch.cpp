@@ -1,3 +1,5 @@
+// simplechessmatch.cpp
+
 #include "simplechessmatch.h"
 
 namespace po = boost::program_options;
@@ -71,6 +73,7 @@ MatchManager::MatchManager(void)
    m_sprt_enabled = false;
    m_sprt_test_finished = false;
    m_sprt_llr = 0.0;
+   // m_next_game_core_type is no longer needed
 }
 
 MatchManager::~MatchManager(void)
@@ -112,18 +115,39 @@ void MatchManager::main_loop(void)
          if (m_game_mgr[i].m_thread_running == 0)
          {
             if (m_thread[i].joinable())
+            {
                m_thread[i].join();
+               // Return the used core lists for each engine back to the pool.
+               return_cores_to_pool(m_game_mgr[i].m_core_for_engine1);
+               return_cores_to_pool(m_game_mgr[i].m_core_for_engine2);
+               m_game_mgr[i].m_core_for_engine1 = "";
+               m_game_mgr[i].m_core_for_engine2 = "";
+            }
 
+            // --- Core allocation logic ---
+            string core_list_1, core_list_2;
+            if (!allocate_cores_for_game(core_list_1, core_list_2))
+            {
+                continue; // Not enough cores for a fair game right now, try again later.
+            }
+            
             if (!swap_sides)
                if (get_next_fen(fen) == 0)
                {
                   // If we run out of FENs but not games, stop the match
                   options.num_games_to_play = m_total_games_started;
-                  break; 
+                  // Return the cores we just took since the game won't run
+                  return_cores_to_pool(core_list_1);
+                  return_cores_to_pool(core_list_2);
+                  break;
                }
+
             m_game_mgr[i].m_fen = fen;
             m_game_mgr[i].m_swap_sides = swap_sides;
             swap_sides = !swap_sides;
+            
+            m_game_mgr[i].m_core_for_engine1 = core_list_1;
+            m_game_mgr[i].m_core_for_engine2 = core_list_2;
 
             m_game_mgr[i].m_thread_running = true;
             m_thread[i] = thread(&GameManager::game_runner, &m_game_mgr[i]);
@@ -155,6 +179,98 @@ void MatchManager::main_loop(void)
    }
 }
 
+// Intelligent core allocation function
+bool MatchManager::allocate_cores_for_game(string& core_list_1, string& core_list_2)
+{
+    lock_guard<mutex> lock(m_core_mutex);
+
+    // For a fair match, both engines must use the same number of threads.
+    // We use cores1 as the reference.
+    if (options.num_cores_1 != options.num_cores_2) {
+        // This should ideally be a startup error, but we can handle it here.
+        cout << "Warning: For fair core allocation, --cores1 and --cores2 should be equal. Using --cores1 value for both." << endl;
+    }
+    uint cores_per_engine = options.num_cores_1;
+    uint total_cores_needed = cores_per_engine * 2;
+
+    // Helper lambda to perform the allocation and build the core strings
+    auto do_allocation = [&](uint p_cores_1, uint e_cores_1, uint p_cores_2, uint e_cores_2) {
+        stringstream ss1, ss2;
+        
+        // --- Allocate for engine 1 ---
+        // P-cores (physical first, then logical)
+        uint p_needed_1 = p_cores_1;
+        uint phys_to_take_1 = min(p_needed_1, (uint)m_available_physical_p_cores.size());
+        for (uint i = 0; i < phys_to_take_1; ++i) { ss1 << m_available_physical_p_cores.back() << ","; m_available_physical_p_cores.pop_back(); }
+        p_needed_1 -= phys_to_take_1;
+        uint log_to_take_1 = min(p_needed_1, (uint)m_available_logical_p_cores.size());
+        for (uint i = 0; i < log_to_take_1; ++i) { ss1 << m_available_logical_p_cores.back() << ","; m_available_logical_p_cores.pop_back(); }
+        // E-cores
+        for (uint i = 0; i < e_cores_1; ++i) { ss1 << m_available_e_cores.back() << ","; m_available_e_cores.pop_back(); }
+
+        // --- Allocate for engine 2 ---
+        // P-cores (physical first, then logical)
+        uint p_needed_2 = p_cores_2;
+        uint phys_to_take_2 = min(p_needed_2, (uint)m_available_physical_p_cores.size());
+        for (uint i = 0; i < phys_to_take_2; ++i) { ss2 << m_available_physical_p_cores.back() << ","; m_available_physical_p_cores.pop_back(); }
+        p_needed_2 -= phys_to_take_2;
+        uint log_to_take_2 = min(p_needed_2, (uint)m_available_logical_p_cores.size());
+        for (uint i = 0; i < log_to_take_2; ++i) { ss2 << m_available_logical_p_cores.back() << ","; m_available_logical_p_cores.pop_back(); }
+        // E-cores
+        for (uint i = 0; i < e_cores_2; ++i) { ss2 << m_available_e_cores.back() << ","; m_available_e_cores.pop_back(); }
+
+        core_list_1 = ss1.str();
+        core_list_2 = ss2.str();
+        if (!core_list_1.empty()) core_list_1.pop_back();
+        if (!core_list_2.empty()) core_list_2.pop_back();
+        return true;
+    };
+
+    // --- Allocation Strategy ---
+
+    // Case 1: P/E cores are defined by user
+    if (!m_p_core_list.empty() || !m_e_core_list.empty())
+    {
+        uint total_p_available = m_available_physical_p_cores.size() + m_available_logical_p_cores.size();
+        
+        // Priority 1: Try to allocate from P-cores only
+        if (total_p_available >= total_cores_needed) {
+            return do_allocation(cores_per_engine, 0, cores_per_engine, 0);
+        }
+
+        // Priority 2: Try to allocate from E-cores only
+        if (m_available_e_cores.size() >= total_cores_needed) {
+            return do_allocation(0, cores_per_engine, 0, cores_per_engine);
+        }
+
+        // Priority 3: Try a symmetric mixed allocation
+        uint p_cores_to_give_each = total_p_available / 2;
+        if (p_cores_to_give_each > 0 && p_cores_to_give_each < cores_per_engine) {
+            uint e_cores_needed_each = cores_per_engine - p_cores_to_give_each;
+            if (m_available_e_cores.size() >= e_cores_needed_each * 2) {
+                return do_allocation(p_cores_to_give_each, e_cores_needed_each, p_cores_to_give_each, e_cores_needed_each);
+            }
+        }
+    }
+
+    // Case 2: Fallback to generic cores (if no P/E cores specified)
+    if (m_available_generic_cores.size() >= total_cores_needed)
+    {
+        stringstream ss1, ss2;
+        for (uint i = 0; i < cores_per_engine; ++i) { ss1 << m_available_generic_cores.back() << ","; m_available_generic_cores.pop_back(); }
+        for (uint i = 0; i < cores_per_engine; ++i) { ss2 << m_available_generic_cores.back() << ","; m_available_generic_cores.pop_back(); }
+        
+        core_list_1 = ss1.str();
+        core_list_2 = ss2.str();
+        if (!core_list_1.empty()) core_list_1.pop_back();
+        if (!core_list_2.empty()) core_list_2.pop_back();
+        return true;
+    }
+
+    // If we reach here, no fair allocation was possible
+    return false;
+}
+
 bool MatchManager::match_completed(void)
 {
    if (m_sprt_enabled && m_sprt_test_finished)
@@ -177,6 +293,56 @@ uint MatchManager::num_games_in_progress(void)
    return games;
 }
 
+void MatchManager::parse_core_list(const string& core_str, vector<int>& core_vec) {
+    stringstream ss(core_str);
+    string core_num_str;
+    while (getline(ss, core_num_str, ',')) {
+        try {
+            core_vec.push_back(stoi(core_num_str));
+        } catch (...) {
+            cout << "Warning: Invalid core number '" << core_num_str << "' in core list." << endl;
+        }
+    }
+}
+
+void MatchManager::return_cores_to_pool(const string& core_list_str)
+{
+    if (core_list_str.empty()) return;
+
+    lock_guard<mutex> lock(m_core_mutex);
+
+    stringstream ss(core_list_str);
+    string core_num_str;
+
+    // Parse the comma-separated list of core numbers
+    while (getline(ss, core_num_str, ','))
+    {
+        try {
+            int core_num = stoi(core_num_str);
+
+            // Check if the core belongs to the P-core master list
+            if (find(m_p_core_list.begin(), m_p_core_list.end(), core_num) != m_p_core_list.end()) {
+                if (core_num % 2 == 0) { // Physical P-cores are even
+                    m_available_physical_p_cores.push_back(core_num);
+                } else { // Logical P-cores are odd
+                    m_available_logical_p_cores.push_back(core_num);
+                }
+            }
+            // Check if the core belongs to the E-core master list
+            else if (find(m_e_core_list.begin(), m_e_core_list.end(), core_num) != m_e_core_list.end()) {
+                m_available_e_cores.push_back(core_num);
+            }
+            // Otherwise, it must be a generic core
+            else {
+                m_available_generic_cores.push_back(core_num);
+            }
+        }
+        catch (...) {
+            cout << "Warning: Could not convert core number '" << core_num_str << "' back to an integer while returning to pool." << endl;
+        }
+    }
+}
+
 int MatchManager::initialize(void)
 {
    if (options.engine_file_name_1.empty() || options.engine_file_name_2.empty())
@@ -184,6 +350,89 @@ int MatchManager::initialize(void)
       cout << "Error: must specify two engines\n";
       return 0;
    }
+
+   // --- Core Initialization and Limiting Logic ---
+   vector<int> p_cores_from_arg, e_cores_from_arg;
+   vector<int> all_hw_cores;
+   uint num_hw_cores = thread::hardware_concurrency();
+   if (num_hw_cores > 0) {
+       for (uint i = 0; i < num_hw_cores; ++i) {
+           all_hw_cores.push_back(i);
+       }
+   }
+   
+   std::random_device rd;
+   std::default_random_engine rng(rd());
+
+   if (!options.pcores.empty()) {
+       parse_core_list(options.pcores, p_cores_from_arg);
+   }
+   if (!options.ecores.empty()) {
+       parse_core_list(options.ecores, e_cores_from_arg);
+   }
+
+   // Auto-detect E-cores if only P-cores are given, and vice-versa
+   if (!options.pcores.empty() && options.ecores.empty() && !all_hw_cores.empty()) {
+       m_p_core_list = p_cores_from_arg;
+       vector<int> p_cores_sorted = p_cores_from_arg;
+       sort(p_cores_sorted.begin(), p_cores_sorted.end());
+       sort(all_hw_cores.begin(), all_hw_cores.end());
+       set_difference(all_hw_cores.begin(), all_hw_cores.end(),
+                      p_cores_sorted.begin(), p_cores_sorted.end(),
+                      back_inserter(m_e_core_list));
+       cout << "Detected " << m_p_core_list.size() << " P-cores from argument and auto-detected " << m_e_core_list.size() << " E-cores." << endl;
+   } else if (options.pcores.empty() && !options.ecores.empty() && !all_hw_cores.empty()) {
+       m_e_core_list = e_cores_from_arg;
+       vector<int> e_cores_sorted = e_cores_from_arg;
+       sort(e_cores_sorted.begin(), e_cores_sorted.end());
+       sort(all_hw_cores.begin(), all_hw_cores.end());
+       set_difference(all_hw_cores.begin(), all_hw_cores.end(),
+                      e_cores_sorted.begin(), e_cores_sorted.end(),
+                      back_inserter(m_p_core_list));
+       cout << "Detected " << m_e_core_list.size() << " E-cores from argument and auto-detected " << m_p_core_list.size() << " P-cores." << endl;
+   } else {
+       m_p_core_list = p_cores_from_arg;
+       m_e_core_list = e_cores_from_arg;
+       if (!m_p_core_list.empty() || !m_e_core_list.empty()) {
+           cout << "Detected " << m_p_core_list.size() << " P-cores and " << m_e_core_list.size() << " E-cores from arguments." << endl;
+       }
+   }
+   
+   // Populate available core pools based on the final master lists
+   if (!m_p_core_list.empty() || !m_e_core_list.empty()) {
+       for (int core : m_p_core_list) {
+           if (core % 2 == 0) { // Physical P-cores are even
+               m_available_physical_p_cores.push_back(core);
+           } else { // Logical P-cores are odd
+               m_available_logical_p_cores.push_back(core);
+           }
+       }
+       m_available_e_cores = m_e_core_list;
+   } else if (!all_hw_cores.empty()) {
+       cout << "No specific cores provided. Using all " << all_hw_cores.size() << " available hardware logical processors as generic cores." << endl;
+       m_available_generic_cores = all_hw_cores;
+   }
+
+   // Check if there are enough total cores for the requested threads and reduce if necessary
+   uint cores_per_thread = options.num_cores_1 + options.num_cores_2;
+   uint total_cores_in_pool = m_available_physical_p_cores.size() + m_available_logical_p_cores.size() + m_available_e_cores.size() + m_available_generic_cores.size();
+
+   if (cores_per_thread > 0 && total_cores_in_pool < options.num_threads * cores_per_thread) {
+       uint old_threads = options.num_threads;
+       options.num_threads = total_cores_in_pool / cores_per_thread;
+       cout << "Warning: Not enough cores in the specified/detected pool (" << total_cores_in_pool << ") for " << old_threads << " threads requiring " << cores_per_thread << " cores each. Reducing threads to " << options.num_threads << "." << endl;
+   }
+   
+   // Shuffle the available pools to randomize which specific cores get picked
+   shuffle(m_available_physical_p_cores.begin(), m_available_physical_p_cores.end(), rng);
+   shuffle(m_available_logical_p_cores.begin(), m_available_logical_p_cores.end(), rng);
+   shuffle(m_available_e_cores.begin(), m_available_e_cores.end(), rng);
+   shuffle(m_available_generic_cores.begin(), m_available_generic_cores.end(), rng);
+   
+   cout << "Final core pools ready. Physical P-cores: " << m_available_physical_p_cores.size() 
+        << ", Logical P-cores: " << m_available_logical_p_cores.size()
+        << ", E-cores: " << m_available_e_cores.size() 
+        << ", Generic cores: " << m_available_generic_cores.size() << endl;
 
    m_sprt_enabled = options.sprt_enabled;
    if (m_sprt_enabled) {
@@ -366,20 +615,17 @@ void MatchManager::print_results(void)
        double E1 = elo_to_score(m_sprt_elo1);
 
        // Estimate the probability of a draw from the match data.
-       // Add a small epsilon to avoid division by zero or log(0) if N=0 or draws=0
        double P_draw = (double)draws / N;
 
        // Probabilities of win, loss, draw for H0
        double w0 = E0 - P_draw / 2.0;
        double l0 = 1.0 - E0 - P_draw / 2.0;
-       double d0 = P_draw;
-
+       
        // Probabilities of win, loss, draw for H1
        double w1 = E1 - P_draw / 2.0;
        double l1 = 1.0 - E1 - P_draw / 2.0;
-       double d1 = P_draw;
 
-       // To avoid log(0) for w,l in case of 100% draw rate
+       // To avoid log(0) for w,l in case of 100% draw rate or no wins/losses yet
        if (w0 <= 0) w0 = 1e-9;
        if (l0 <= 0) l0 = 1e-9;
        if (w1 <= 0) w1 = 1e-9;
@@ -403,11 +649,11 @@ void MatchManager::print_results(void)
    }
    
    // --- Clear screen and print new stats ---
-#ifdef WIN32
-   system("cls");
-#else
-   cout << "\033[2J\033[1;1H";
-#endif
+   #ifdef WIN32
+     system("cls");
+   #else
+     cout << "\033[2J\033[1;1H";
+   #endif
 
    cout << "Engine1: " << options.engine_file_name_1 << " vs Engine2: " << options.engine_file_name_2 << "\n\n";
 
@@ -513,16 +759,18 @@ int parse_cmd_line_options(int argc, char* argv[])
          ("e2",         po::value<string>(&options.engine_file_name_2), "second engine's file name")
          ("x1",         "first engine uses xboard protocol. (UCI is the default protocol.)")
          ("x2",         "second engine uses xboard protocol. (UCI is the default protocol.)")
-         ("cores1",     po::value<uint>(&options.num_cores_1)->default_value(1), "first engine number of cores")
-         ("cores2",     po::value<uint>(&options.num_cores_2)->default_value(1), "second engine number of cores")
+         ("cores1",     po::value<uint>(&options.num_cores_1)->default_value(1), "first engine number of cores/threads")
+         ("cores2",     po::value<uint>(&options.num_cores_2)->default_value(1), "second engine number of cores/threads")
          ("mem1",       po::value<uint>(&options.mem_size_1)->default_value(128), "first engine memory usage (MB)")
          ("mem2",       po::value<uint>(&options.mem_size_2)->default_value(128), "second engine memory usage (MB)")
          ("custom1",    po::value<vector<string>>(&options.custom_commands_1), "first engine custom command. e.g. --custom1 \"setoption name Style value Risky\"")
          ("custom2",    po::value<vector<string>>(&options.custom_commands_2), "second engine custom command. Note: --custom1 and --custom2 can be used more than once in the command line.")
+         ("pcores",     po::value<string>(&options.pcores), "CPU affinity P-cores (e.g., \"0,1,2,3\")")
+         ("ecores",     po::value<string>(&options.ecores), "CPU affinity E-cores (e.g., \"4,5,6,7\")")
          ("debug1",     "enable debug for first engine")
          ("debug2",     "enable debug for second engine")
-         ("ponder1",    "enable extra ponder time for engine 1") // <-- NEW
-         ("ponder2",    "enable extra ponder time for engine 2") // <-- NEW
+         ("ponder1",    "enable extra ponder time for engine 1")
+         ("ponder2",    "enable extra ponder time for engine 2")
          ("tc",         po::value<uint>(&options.tc_ms)->default_value(10000), "time control base time (ms)")
          ("inc",        po::value<uint>(&options.tc_inc_ms)->default_value(100), "time control increment (ms)")
          ("fixed",      po::value<uint>(&options.tc_fixed_time_move_ms)->default_value(0), "time control fixed time per move (ms). This must be set to 0, unless engines should simply use a fixed amount of time per move.")
@@ -563,8 +811,8 @@ int parse_cmd_line_options(int argc, char* argv[])
       options.uci_2 = (var_map.count("x2") == 0);
       options.debug_1 = (var_map.count("debug1") != 0);
       options.debug_2 = (var_map.count("debug2") != 0);
-      options.ponder1 = (var_map.count("ponder1") != 0); // <-- NEW
-      options.ponder2 = (var_map.count("ponder2") != 0); // <-- NEW
+      options.ponder1 = (var_map.count("ponder1") != 0);
+      options.ponder2 = (var_map.count("ponder2") != 0);
       options.continue_on_error = (var_map.count("continue") != 0);
       options.print_moves = (var_map.count("pmoves") != 0);
       options.fourplayerchess = (var_map.count("4pc") != 0);

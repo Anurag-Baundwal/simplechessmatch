@@ -22,6 +22,8 @@ public:
    string m_fen;
    string m_pgn;
    atomic<bool> m_pgn_valid;
+   string m_core_for_engine1; // Core(s) for engine 1 in this game
+   string m_core_for_engine2; // Core(s) for engine 2 in this game
 
 private:
    string m_move_list;

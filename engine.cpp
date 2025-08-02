@@ -1,5 +1,7 @@
 #include "engine.h"
-
+#ifdef WIN32
+#include <windows.h>
+#endif
 namespace bp = boost::process;
 
 extern struct options_info options;
@@ -71,6 +73,46 @@ int Engine::load_engine(const string &eng_file_name, int ID, engine_number engin
 
    return 1;
 }
+
+void Engine::set_affinity(const string &core_list)
+{
+#ifdef WIN32
+    if (!core_list.empty())
+    {
+        DWORD_PTR affinity_mask = 0;
+        stringstream ss(core_list);
+        string core_num_str;
+
+        // Parse comma-separated list of core numbers (e.g., "2,3,4,5")
+        while (getline(ss, core_num_str, ','))
+        {
+          try {
+              int core_num = stoi(core_num_str);
+              if (core_num >= 0 && core_num < sizeof(DWORD_PTR) * 8) {
+                affinity_mask |= (static_cast<DWORD_PTR>(1) << core_num);
+              }
+          }
+          catch (...) {
+              cout << "Warning: Invalid core number '" << core_num_str << "' in affinity string for " << m_name << endl;
+          }
+        }
+
+        if (affinity_mask > 0)
+        {
+          if (!SetProcessAffinityMask(m_child_proc->native_handle(), affinity_mask))
+          {
+              cout << "Warning: Failed to set CPU affinity for " << m_name << ". Error code: " << GetLastError() << endl;
+          }
+          else
+          {
+              if (m_debug)
+                cout << "TO ENGINE " << m_ID << ": Set affinity mask to 0x" << hex << affinity_mask << dec << " for " << m_name << endl;
+          }
+        }
+    }
+#endif
+}
+
 
 int Engine::get_features(void)
 {
