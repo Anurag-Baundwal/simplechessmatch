@@ -86,6 +86,8 @@ void MatchManager::cleanup(void)
       m_FENs_file.close();
    if (m_pgn_file.is_open())
       m_pgn_file.close();
+   if (m_results_log_file.is_open())
+      m_results_log_file.close();
 
    for (uint i = 0; i < options.num_threads; i++)
       if (m_thread[i].joinable())
@@ -478,6 +480,13 @@ int MatchManager::initialize(void)
    }
    else
       options.pgn4_format = options.fourplayerchess;
+   
+   // Open results_log.txt in truncate mode to clear it on a new run.
+   m_results_log_file.open("results_log.txt", ios::out | ios::trunc);
+   if (!m_results_log_file.is_open())
+   {
+      cout << "Warning: could not open results_log.txt for writing.\n";
+   }
 
    m_game_mgr = new GameManager[options.num_threads];
    m_thread = new thread[options.num_threads];
@@ -648,73 +657,99 @@ void MatchManager::print_results(void)
        }
    }
    
-   // --- Clear screen and print new stats ---
+   // --- Build the output string ---
+   stringstream ss_output;
+
+   ss_output << "Engine1: " << options.engine_file_name_1 << " vs Engine2: " << options.engine_file_name_2 << "\n\n";
+
+   if (N == 0) {
+       ss_output << "No games completed yet." << endl;
+   } else {
+       double score = (double)(engine1_wins + (double)draws / 2.0) / N;
+   
+       ss_output << fixed << setprecision(2);
+   
+       // Elo
+       if (score <= 1e-9 || score >= 1.0 - 1e-9) {
+           ss_output << "Elo   | " << (score > 0.5 ? "+inf" : "-inf") << endl;
+       } else {
+           double elo_diff = -400.0 * log10(1.0 / score - 1.0);
+           double win_frac = (double)engine1_wins / N;
+           double draw_frac = (double)draws / N;
+           double variance_of_score = (win_frac + 0.25 * draw_frac - score * score);
+           double std_error_of_mean_score = sqrt(variance_of_score / N);
+           double elo_per_score = 400.0 / (score * (1.0 - score) * log(10.0));
+           double std_error_of_elo = elo_per_score * std_error_of_mean_score;
+           double elo_margin = 1.96 * std_error_of_elo;
+           ss_output << "Elo   | " << elo_diff << " +- " << elo_margin << " (95%)" << endl;
+       }
+   
+       // SPRT
+       if (m_sprt_enabled) {
+          stringstream tc_ss;
+          if (options.tc_fixed_time_move_ms > 0) {
+              tc_ss << fixed << setprecision(2) << (float)options.tc_fixed_time_move_ms / 1000.0 << "s";
+          } else {
+              tc_ss << options.tc_ms / 1000 << "+" << fixed << setprecision(2) << (float)options.tc_inc_ms / 1000.0;
+          }
+          string tc_str = tc_ss.str();
+      
+          ss_output << "SPRT  | " << options.sprt_elo1 << " " << tc_str << " Threads=" << options.num_threads << " Hash=" << options.mem_size_1 << "MB" << endl;
+          ss_output << "LLR   | " << m_sprt_llr << " (" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << ") [" 
+               << m_sprt_elo0 << ", " << m_sprt_elo1 << "]" << endl;
+       }
+   
+       // Games
+       ss_output << "Games | N: " << N << " W: " << engine1_wins << " L: " << engine2_wins << " D: " << draws << endl;
+   
+       // Other info
+       stringstream ss;
+       if (illegal_move_games != 0)
+          ss << "  [Illegal Moves: " << illegal_move_games << "]";
+       if ((engine1_losses_on_time != 0) || (engine2_losses_on_time != 0))
+          ss << "  [Timeouts: " << engine1_losses_on_time << " / " << engine2_losses_on_time <<  "]";
+       if (ss.str().length() > 0)
+          ss_output << "Info  |" << ss.str() << endl;
+
+       if (m_sprt_enabled && m_sprt_test_finished) {
+            ss_output << "\nSPRT test finished: ";
+            if(m_sprt_llr >= m_sprt_upper_bound)
+                ss_output << "H1 accepted (engine 1 is stronger)." << endl;
+            else
+                ss_output << "H0 accepted (elo is within bounds)." << endl;
+       }
+   }
+   
+   string output_str = ss_output.str();
+
+   // --- Write to results.txt (overwrite) ---
+   ofstream results_file("results.txt", ios::out | ios::trunc);
+   if (results_file.is_open())
+   {
+      results_file << output_str;
+      results_file.close();
+   }
+   
+   // --- Append to results_log.txt ---
+   if (m_results_log_file.is_open())
+   {
+       static bool first_log_entry = true;
+       if (!first_log_entry) {
+           m_results_log_file << "\n-------------------------------------------------\n\n";
+       }
+       m_results_log_file << output_str;
+       m_results_log_file.flush();
+       first_log_entry = false;
+   }
+
+   // --- Clear screen and print to console ---
    #ifdef WIN32
      system("cls");
    #else
      cout << "\033[2J\033[1;1H";
    #endif
 
-   cout << "Engine1: " << options.engine_file_name_1 << " vs Engine2: " << options.engine_file_name_2 << "\n\n";
-
-   if (N == 0) {
-       cout << "No games completed yet." << endl;
-       return;
-   }
-   
-   double score = (double)(engine1_wins + (double)draws / 2.0) / N;
-   
-   cout << fixed << setprecision(2);
-   
-   // Elo
-   if (score <= 1e-9 || score >= 1.0 - 1e-9) {
-       cout << "Elo   | " << (score > 0.5 ? "+inf" : "-inf") << endl;
-   } else {
-       double elo_diff = -400.0 * log10(1.0 / score - 1.0);
-       double win_frac = (double)engine1_wins / N;
-       double draw_frac = (double)draws / N;
-       double variance_of_score = (win_frac + 0.25 * draw_frac - score * score);
-       double std_error_of_mean_score = sqrt(variance_of_score / N);
-       double elo_per_score = 400.0 / (score * (1.0 - score) * log(10.0));
-       double std_error_of_elo = elo_per_score * std_error_of_mean_score;
-       double elo_margin = 1.96 * std_error_of_elo;
-       cout << "Elo   | " << elo_diff << " +- " << elo_margin << " (95%)" << endl;
-   }
-   
-   // SPRT
-   if (m_sprt_enabled) {
-      stringstream tc_ss;
-      if (options.tc_fixed_time_move_ms > 0) {
-          tc_ss << fixed << setprecision(2) << (float)options.tc_fixed_time_move_ms / 1000.0 << "s";
-      } else {
-          tc_ss << options.tc_ms / 1000 << "+" << fixed << setprecision(2) << (float)options.tc_inc_ms / 1000.0;
-      }
-      string tc_str = tc_ss.str();
-      
-      cout << "SPRT  | " << options.sprt_elo1 << " " << tc_str << " Threads=" << options.num_threads << " Hash=" << options.mem_size_1 << "MB" << endl;
-      cout << "LLR   | " << m_sprt_llr << " (" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << ") [" 
-           << m_sprt_elo0 << ", " << m_sprt_elo1 << "]" << endl;
-   }
-   
-   // Games
-   cout << "Games | N: " << N << " W: " << engine1_wins << " L: " << engine2_wins << " D: " << draws << endl;
-   
-   // Other info
-   stringstream ss;
-   if (illegal_move_games != 0)
-      ss << "  [Illegal Moves: " << illegal_move_games << "]";
-   if ((engine1_losses_on_time != 0) || (engine2_losses_on_time != 0))
-      ss << "  [Timeouts: " << engine1_losses_on_time << " / " << engine2_losses_on_time <<  "]";
-   if (ss.str().length() > 0)
-      cout << "Info  |" << ss.str() << endl;
-
-   if (m_sprt_enabled && m_sprt_test_finished) {
-        cout << "\nSPRT test finished: ";
-        if(m_sprt_llr >= m_sprt_upper_bound)
-            cout << "H1 accepted (engine 1 is stronger)." << endl;
-        else
-            cout << "H0 accepted (elo is within bounds)." << endl;
-   }
+   cout << output_str;
 }
 
 int MatchManager::get_next_fen(string &fen)

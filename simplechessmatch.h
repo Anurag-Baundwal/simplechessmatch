@@ -36,6 +36,7 @@ private:
    bool m_engines_shut_down;
    fstream m_FENs_file;
    fstream m_pgn_file;
+   fstream m_results_log_file;
 
    // Core management
    vector<int> m_available_physical_p_cores;
