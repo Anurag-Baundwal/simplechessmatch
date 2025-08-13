@@ -34,6 +34,7 @@ private:
    bool m_engines_shut_down;
    fstream m_FENs_file;
    fstream m_pgn_file;
+   fstream m_results_log_file;
 
    // SPRT related members
    bool m_sprt_enabled;
