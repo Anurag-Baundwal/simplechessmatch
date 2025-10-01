@@ -170,8 +170,30 @@ void MatchManager::main_loop(void)
             return;
          }
          for (uint i = 0; i < options.num_threads; i++)
-            if (m_game_mgr[i].m_engine_disconnected || m_game_mgr[i].is_engine_unresponsive() || (!options.continue_on_error && m_game_mgr[i].m_error))
-               return;
+         {
+             if (m_game_mgr[i].m_engine_disconnected || m_game_mgr[i].is_engine_unresponsive() || (!options.continue_on_error && m_game_mgr[i].m_error))
+             {
+                 cout << "\nError detected in a game thread. Shutting down." << endl;
+                 // Shut down all engines first to prevent them from becoming orphaned processes.
+                 shut_down_all_engines();  
+                 // Now, join all threads and return their cores to the pool.
+                 for (uint j = 0; j < options.num_threads; j++)
+                 {
+                     if (m_thread[j].joinable())
+                     {
+                         m_thread[j].join(); // Wait for the thread to exit.
+                     }
+                     // Return cores regardless of whether it was joined, as they were allocated.
+                     if (!m_game_mgr[j].m_core_for_engine1.empty())
+                     {
+                         return_cores_to_pool(m_game_mgr[j].m_core_for_engine1);
+                         m_game_mgr[j].m_core_for_engine1.clear();
+                         m_game_mgr[j].m_core_for_engine2.clear();
+                     }
+                 }
+                 return; // Now it's safe to exit the loop.
+             }
+          }
         
          // Re-check condition to break out of this waiting loop
          all_threads_busy_or_match_done = !new_game_can_start() || (m_total_games_started >= options.num_games_to_play);
