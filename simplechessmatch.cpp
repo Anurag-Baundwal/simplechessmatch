@@ -70,11 +70,11 @@ MatchManager::MatchManager(void)
    m_engines_shut_down = false;
    m_game_mgr = nullptr;
    m_thread = nullptr;
-   m_user_initiated_exit = false; // <<< MODIFIED: Initialize the new flag
+   // This flag is used to differentiate a user-initiated stop (Ctrl+C) from an actual engine error.
+   m_user_initiated_exit = false;
    m_sprt_enabled = false;
    m_sprt_test_finished = false;
    m_sprt_llr = 0.0;
-   // m_next_game_core_type is no longer needed
 }
 
 MatchManager::~MatchManager(void)
@@ -90,6 +90,7 @@ void MatchManager::cleanup(void)
    if (m_results_log_file.is_open())
       m_results_log_file.close();
 
+   // Wait for any remaining game threads to finish before exiting.
    for (uint i = 0; i < options.num_threads; i++)
       if (m_thread[i].joinable())
          m_thread[i].join();
@@ -111,17 +112,19 @@ void MatchManager::main_loop(void)
 
    while (!match_completed())
    {
+      // This loop identifies available game slots and starts new games.
       for (uint i = 0; i < options.num_threads; i++)
       {
          if (!new_game_can_start())
             break;
+         
          if (m_game_mgr[i].m_thread_running == 0)
          {
+            // If the thread slot is free, first clean up the previous game's resources.
             if (m_thread[i].joinable())
             {
                m_thread[i].join();
-               // MODIFIED: Since both engines share the same core list, we only need to return one of them to the pool.
-               // Returning both would be a bug (returning the same cores twice).
+               // Return the cores used by the finished game to the available pool.
                return_cores_to_pool(m_game_mgr[i].m_core_for_engine1);
                m_game_mgr[i].m_core_for_engine1 = "";
                m_game_mgr[i].m_core_for_engine2 = "";
@@ -131,15 +134,16 @@ void MatchManager::main_loop(void)
             string shared_core_list;
             if (!allocate_cores_for_game(shared_core_list))
             {
-                continue; // Not enough cores for a game right now, try again later.
+                // Not enough cores for a game right now, try again in the next iteration.
+                continue;
             }
             
             if (!swap_sides)
                if (get_next_fen(fen) == 0)
                {
-                  // If we run out of FENs but not games, stop the match
+                  // If we run out of FENs but not games, stop the match.
                   options.num_games_to_play = m_total_games_started;
-                  // Return the cores we just took since the game won't run
+                  // Return the cores we just took, as the game won't run.
                   return_cores_to_pool(shared_core_list);
                   break;
                }
@@ -148,7 +152,6 @@ void MatchManager::main_loop(void)
             m_game_mgr[i].m_swap_sides = swap_sides;
             swap_sides = !swap_sides;
             
-            // MODIFIED: Assign the same shared list to both engines for this game manager.
             m_game_mgr[i].m_core_for_engine1 = shared_core_list;
             m_game_mgr[i].m_core_for_engine2 = shared_core_list;
 
@@ -158,35 +161,40 @@ void MatchManager::main_loop(void)
          }
       }
 
-      // This loop waits for threads to finish and prints updates
+      // This loop waits for running games to finish and provides match status updates.
       bool all_threads_busy_or_match_done = !new_game_can_start() || (m_total_games_started >= options.num_games_to_play);
       while (all_threads_busy_or_match_done && !match_completed())
       {
          this_thread::sleep_for(500ms);
          print_results();
          save_pgn();
+
          if (_kbhit())
          {
             cout << "\nKey pressed, terminating match.\n";
-            m_user_initiated_exit = true; // <<< MODIFIED: Set the flag on key press
+            m_user_initiated_exit = true;
             return;
          }
+
+         // Check all running games for unexpected errors.
          for (uint i = 0; i < options.num_threads; i++)
          {
-             // <<< MODIFIED: Check the flag before treating a disconnect as an error
+             // Only treat a disconnect as an error if it wasn't caused by the user pressing Ctrl+C.
              if (!m_user_initiated_exit && (m_game_mgr[i].m_engine_disconnected || m_game_mgr[i].is_engine_unresponsive() || (!options.continue_on_error && m_game_mgr[i].m_error)))
              {
                  cout << "\nError detected in a game thread. Shutting down." << endl;
+                 
                  // Shut down all engines first to prevent them from becoming orphaned processes.
                  shut_down_all_engines();  
-                 // Now, join all threads and return their cores to the pool.
+
+                 // Join all threads and return their cores to the pool for a clean exit.
                  for (uint j = 0; j < options.num_threads; j++)
                  {
                      if (m_thread[j].joinable())
                      {
                          m_thread[j].join(); // Wait for the thread to exit.
                      }
-                     // Return cores regardless of whether it was joined, as they were allocated.
+                     // Return cores regardless of whether the thread was joined, as they were already allocated.
                      if (!m_game_mgr[j].m_core_for_engine1.empty())
                      {
                          return_cores_to_pool(m_game_mgr[j].m_core_for_engine1);
@@ -194,20 +202,19 @@ void MatchManager::main_loop(void)
                          m_game_mgr[j].m_core_for_engine2.clear();
                      }
                  }
-                 return; // Now it's safe to exit the loop.
+                 return; // Exit the main loop.
              }
           }
         
-         // Re-check condition to break out of this waiting loop
+         // Re-check the condition to break out of this waiting loop.
          all_threads_busy_or_match_done = !new_game_can_start() || (m_total_games_started >= options.num_games_to_play);
       }
-      // Brief sleep in the outer loop to avoid busy-waiting when threads are finishing
+      
+      // Brief sleep in the outer loop to avoid busy-waiting when threads are finishing.
       this_thread::sleep_for(50ms);
    }
 }
 
-// MODIFIED: This function now allocates a SINGLE set of cores and returns it.
-// It no longer takes two string references, just one.
 bool MatchManager::allocate_cores_for_game(string& shared_core_list)
 {
     lock_guard<mutex> lock(m_core_mutex);
@@ -218,11 +225,11 @@ bool MatchManager::allocate_cores_for_game(string& shared_core_list)
     }
     uint cores_needed_per_game = options.num_cores_1;
 
-    // Helper lambda to perform the allocation and build the core string
+    // Helper lambda to perform the allocation and build the core string.
     auto do_allocation = [&](uint p_cores, uint e_cores) {
         stringstream ss;
         
-        // P-cores (physical first, then logical)
+        // P-cores (physical first, then logical to prioritize performance)
         uint p_needed = p_cores;
         uint phys_to_take = min(p_needed, (uint)m_available_physical_p_cores.size());
         for (uint i = 0; i < phys_to_take; ++i) { ss << m_available_physical_p_cores.back() << ","; m_available_physical_p_cores.pop_back(); }
@@ -234,28 +241,28 @@ bool MatchManager::allocate_cores_for_game(string& shared_core_list)
         for (uint i = 0; i < e_cores; ++i) { ss << m_available_e_cores.back() << ","; m_available_e_cores.pop_back(); }
         
         shared_core_list = ss.str();
-        if (!shared_core_list.empty()) shared_core_list.pop_back();
+        if (!shared_core_list.empty()) shared_core_list.pop_back(); // Remove trailing comma
         return true;
     };
 
     // --- Allocation Strategy ---
 
-    // Case 1: P/E cores are defined by user
+    // Case 1: P/E cores are defined by user, apply tiered allocation.
     if (!m_p_core_list.empty() || !m_e_core_list.empty())
     {
         uint total_p_available = m_available_physical_p_cores.size() + m_available_logical_p_cores.size();
         
-        // Priority 1: Try to allocate from P-cores only
+        // Priority 1: Try to allocate from P-cores only.
         if (total_p_available >= cores_needed_per_game) {
             return do_allocation(cores_needed_per_game, 0);
         }
 
-        // Priority 2: Try to allocate from E-cores only
+        // Priority 2: Try to allocate from E-cores only.
         if (m_available_e_cores.size() >= cores_needed_per_game) {
             return do_allocation(0, cores_needed_per_game);
         }
 
-        // Priority 3: Try a mixed allocation
+        // Priority 3: Try a mixed allocation of all available P-cores and remaining E-cores.
         if (total_p_available > 0) {
             uint e_cores_needed = cores_needed_per_game - total_p_available;
             if (m_available_e_cores.size() >= e_cores_needed) {
@@ -264,7 +271,7 @@ bool MatchManager::allocate_cores_for_game(string& shared_core_list)
         }
     }
 
-    // Case 2: Fallback to generic cores (if no P/E cores specified)
+    // Case 2: No P/E cores specified, fall back to generic allocation.
     if (m_available_generic_cores.size() >= cores_needed_per_game)
     {
         stringstream ss;
@@ -275,7 +282,7 @@ bool MatchManager::allocate_cores_for_game(string& shared_core_list)
         return true;
     }
 
-    // If we reach here, no allocation was possible
+    // If we reach here, no allocation was possible.
     return false;
 }
 
@@ -328,7 +335,7 @@ void MatchManager::return_cores_to_pool(const string& core_list_str)
         try {
             int core_num = stoi(core_num_str);
 
-            // Check if the core belongs to the P-core master list
+            // Correctly categorize and return the core to its original pool.
             if (find(m_p_core_list.begin(), m_p_core_list.end(), core_num) != m_p_core_list.end()) {
                 if (core_num % 2 == 0) { // Physical P-cores are even
                     m_available_physical_p_cores.push_back(core_num);
@@ -336,11 +343,9 @@ void MatchManager::return_cores_to_pool(const string& core_list_str)
                     m_available_logical_p_cores.push_back(core_num);
                 }
             }
-            // Check if the core belongs to the E-core master list
             else if (find(m_e_core_list.begin(), m_e_core_list.end(), core_num) != m_e_core_list.end()) {
                 m_available_e_cores.push_back(core_num);
             }
-            // Otherwise, it must be a generic core
             else {
                 m_available_generic_cores.push_back(core_num);
             }
@@ -379,7 +384,7 @@ int MatchManager::initialize(void)
        parse_core_list(options.ecores, e_cores_from_arg);
    }
 
-   // Auto-detect E-cores if only P-cores are given, and vice-versa
+   // Auto-detect E-cores if only P-cores are given, and vice-versa.
    if (!options.pcores.empty() && options.ecores.empty() && !all_hw_cores.empty()) {
        m_p_core_list = p_cores_from_arg;
        vector<int> p_cores_sorted = p_cores_from_arg;
@@ -406,7 +411,7 @@ int MatchManager::initialize(void)
        }
    }
    
-   // Populate available core pools based on the final master lists
+   // Populate available core pools based on the final master lists.
    if (!m_p_core_list.empty() || !m_e_core_list.empty()) {
        for (int core : m_p_core_list) {
            if (core % 2 == 0) { // Physical P-cores are even
@@ -421,7 +426,7 @@ int MatchManager::initialize(void)
        m_available_generic_cores = all_hw_cores;
    }
 
-   // MODIFIED: The number of cores needed per game is now just options.num_cores_1.
+   // Dynamically reduce thread count if not enough cores are available for the requested concurrency.
    uint cores_per_game = options.num_cores_1;
    uint total_cores_in_pool = m_available_physical_p_cores.size() + m_available_logical_p_cores.size() + m_available_e_cores.size() + m_available_generic_cores.size();
 
@@ -431,7 +436,7 @@ int MatchManager::initialize(void)
        cout << "Warning: Not enough cores in the pool (" << total_cores_in_pool << ") for " << old_threads << " concurrent games requiring " << cores_per_game << " core(s) each. Reducing concurrent games to " << options.num_threads << "." << endl;
    }
    
-   // Shuffle the available pools to randomize which specific cores get picked
+   // Shuffle the available pools to randomize which specific cores get picked for each game.
    shuffle(m_available_physical_p_cores.begin(), m_available_physical_p_cores.end(), rng);
    shuffle(m_available_logical_p_cores.begin(), m_available_logical_p_cores.end(), rng);
    shuffle(m_available_e_cores.begin(), m_available_e_cores.end(), rng);
@@ -533,7 +538,7 @@ void MatchManager::shut_down_all_engines(void)
 
    cout << "shutting down engines...\n";
 
-   // poll for all engines shut down, for up to 500 ms.
+   // Poll for a graceful shutdown, giving engines a moment to comply.
    int num_engines_running;
    for (int x = 0; x < 10; x++)
    {
@@ -545,6 +550,7 @@ void MatchManager::shut_down_all_engines(void)
          return;
    }
 
+   // If engines are still running, force their termination.
    for (uint i = 0; i < options.num_threads; i++)
    {
       m_game_mgr[i].m_engine1.force_exit();
@@ -912,17 +918,19 @@ int _kbhit(void)
 #endif
 #endif
 
+// Signal handler for Ctrl+C.
+// This must only contain async-safe operations. Setting an atomic flag is safe.
 #ifdef WIN32
 BOOL WINAPI ctrl_c_handler(DWORD fdwCtrlType)
 {
-   match_mgr.m_user_initiated_exit = true; // <<< MODIFIED: Set the flag
+   match_mgr.m_user_initiated_exit = true;
    match_mgr.shut_down_all_engines();
    return true;
 }
 #else
 void ctrl_c_handler(int s)
 {
-   match_mgr.m_user_initiated_exit = true; // <<< MODIFIED: Set the flag
+   match_mgr.m_user_initiated_exit = true;
    match_mgr.shut_down_all_engines();
 }
 #endif

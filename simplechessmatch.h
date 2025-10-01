@@ -3,6 +3,7 @@
 #include <fstream>
 #include <cmath>
 #include <iomanip>
+#include <atomic>    // For std::atomic
 #include <algorithm> // For std::sort, std::set_difference, std::shuffle
 #include <random>    // For std::default_random_engine, std::random_device
 #include <mutex>     // For std::mutex
@@ -17,6 +18,7 @@
 
 #define MAX_THREADS 32
 
+// Forward declarations
 int parse_cmd_line_options(int argc, char* argv[]);
 #ifdef WIN32
 BOOL WINAPI ctrl_c_handler(DWORD fdwCtrlType);
@@ -29,10 +31,12 @@ class MatchManager
 {
 public:
    GameManager *m_game_mgr;
+   // This flag is set by the signal handler to notify the main loop of a clean exit.
+   // It must be atomic to ensure thread-safe communication.
+   atomic<bool> m_user_initiated_exit;
 
 private:
    thread *m_thread;
-   atomic<bool> m_user_initiated_exit;
    uint m_total_games_started;
    bool m_engines_shut_down;
    fstream m_FENs_file;
@@ -79,6 +83,5 @@ private:
    int get_next_fen(string &fen);
    void parse_core_list(const string& core_str, vector<int>& core_vec);
    void return_cores_to_pool(const string& core_list_str);
-   // MODIFIED: The function declaration now correctly takes only one argument.
    bool allocate_cores_for_game(string& shared_core_list);
 };
