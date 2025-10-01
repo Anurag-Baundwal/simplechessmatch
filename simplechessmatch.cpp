@@ -70,6 +70,7 @@ MatchManager::MatchManager(void)
    m_engines_shut_down = false;
    m_game_mgr = nullptr;
    m_thread = nullptr;
+   m_user_initiated_exit = false; // <<< MODIFIED: Initialize the new flag
    m_sprt_enabled = false;
    m_sprt_test_finished = false;
    m_sprt_llr = 0.0;
@@ -167,11 +168,13 @@ void MatchManager::main_loop(void)
          if (_kbhit())
          {
             cout << "\nKey pressed, terminating match.\n";
+            m_user_initiated_exit = true; // <<< MODIFIED: Set the flag on key press
             return;
          }
          for (uint i = 0; i < options.num_threads; i++)
          {
-             if (m_game_mgr[i].m_engine_disconnected || m_game_mgr[i].is_engine_unresponsive() || (!options.continue_on_error && m_game_mgr[i].m_error))
+             // <<< MODIFIED: Check the flag before treating a disconnect as an error
+             if (!m_user_initiated_exit && (m_game_mgr[i].m_engine_disconnected || m_game_mgr[i].is_engine_unresponsive() || (!options.continue_on_error && m_game_mgr[i].m_error)))
              {
                  cout << "\nError detected in a game thread. Shutting down." << endl;
                  // Shut down all engines first to prevent them from becoming orphaned processes.
@@ -912,12 +915,14 @@ int _kbhit(void)
 #ifdef WIN32
 BOOL WINAPI ctrl_c_handler(DWORD fdwCtrlType)
 {
+   match_mgr.m_user_initiated_exit = true; // <<< MODIFIED: Set the flag
    match_mgr.shut_down_all_engines();
    return true;
 }
 #else
 void ctrl_c_handler(int s)
 {
+   match_mgr.m_user_initiated_exit = true; // <<< MODIFIED: Set the flag
    match_mgr.shut_down_all_engines();
 }
 #endif

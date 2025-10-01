@@ -32,6 +32,7 @@ public:
 
 private:
    thread *m_thread;
+   atomic<bool> m_user_initiated_exit;
    uint m_total_games_started;
    bool m_engines_shut_down;
    fstream m_FENs_file;
