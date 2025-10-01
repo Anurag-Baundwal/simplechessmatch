@@ -9,12 +9,12 @@ class GameManager
 public:
    Engine m_engine1;
    Engine m_engine2;
-   uint m_engine1_wins;
-   uint m_engine2_wins;
-   uint m_draws;
-   uint m_engine1_losses_on_time;
-   uint m_engine2_losses_on_time;
-   uint m_illegal_move_games;
+   atomic<uint> m_engine1_wins;
+   atomic<uint> m_engine2_wins;
+   atomic<uint> m_draws;
+   atomic<uint> m_engine1_losses_on_time;
+   atomic<uint> m_engine2_losses_on_time;
+   atomic<uint> m_illegal_move_games;
    bool m_thread_running;
    bool m_swap_sides;
    bool m_error;

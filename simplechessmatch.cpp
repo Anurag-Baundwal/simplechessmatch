@@ -612,12 +612,12 @@ void MatchManager::print_results(void)
 
    for (uint i = 0; i < options.num_threads; i++)
    {
-      engine1_wins += m_game_mgr[i].m_engine1_wins;
-      engine2_wins += m_game_mgr[i].m_engine2_wins;
-      draws += m_game_mgr[i].m_draws;
-      illegal_move_games += m_game_mgr[i].m_illegal_move_games;
-      engine1_losses_on_time += m_game_mgr[i].m_engine1_losses_on_time;
-      engine2_losses_on_time += m_game_mgr[i].m_engine2_losses_on_time;
+      engine1_wins += m_game_mgr[i].m_engine1_wins.load(memory_order_relaxed);
+      engine2_wins += m_game_mgr[i].m_engine2_wins.load(memory_order_relaxed);
+      draws += m_game_mgr[i].m_draws.load(memory_order_relaxed);
+      illegal_move_games += m_game_mgr[i].m_illegal_move_games.load(memory_order_relaxed);
+      engine1_losses_on_time += m_game_mgr[i].m_engine1_losses_on_time.load(memory_order_relaxed);
+      engine2_losses_on_time += m_game_mgr[i].m_engine2_losses_on_time.load(memory_order_relaxed);
    }
    
    int N = engine1_wins + engine2_wins + draws;
@@ -714,6 +714,22 @@ void MatchManager::print_results(void)
        // Games
        ss_output << "Games | N: " << N << " W: " << engine1_wins << " L: " << engine2_wins << " D: " << draws << endl;
    
+       ss_output << endl;
+
+       // Per-thread stats
+       for (uint i = 0; i < options.num_threads; i++)
+       {
+           uint thread_wins = m_game_mgr[i].m_engine1_wins.load(memory_order_relaxed);
+           uint thread_losses = m_game_mgr[i].m_engine2_wins.load(memory_order_relaxed);
+           uint thread_draws = m_game_mgr[i].m_draws.load(memory_order_relaxed);
+           uint thread_n = thread_wins + thread_losses + thread_draws;
+
+           ss_output << "Thread " << i << " | N: " << thread_n
+               << " W: " << thread_wins
+               << " L: " << thread_losses
+               << " D: " << thread_draws << endl;
+       }
+       
        // Other info
        stringstream ss;
        if (illegal_move_games != 0)
