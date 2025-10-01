@@ -78,5 +78,6 @@ private:
    int get_next_fen(string &fen);
    void parse_core_list(const string& core_str, vector<int>& core_vec);
    void return_cores_to_pool(const string& core_list_str);
-   bool allocate_cores_for_game(string& core_list_1, string& core_list_2);
+   // MODIFIED: The function declaration now correctly takes only one argument.
+   bool allocate_cores_for_game(string& shared_core_list);
 };
