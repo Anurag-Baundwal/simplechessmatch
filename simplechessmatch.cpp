@@ -356,6 +356,105 @@ void MatchManager::return_cores_to_pool(const string& core_list_str)
     }
 }
 
+bool MatchManager::load_state_from_resume_file()
+{
+    ifstream resume_file(options.resume_filename);
+    if (!resume_file.is_open())
+    {
+        cout << "Error: could not open resume file " << options.resume_filename << endl;
+        return false;
+    }
+
+    cout << "Resuming match from " << options.resume_filename << "..." << endl;
+
+    string line;
+    uint total_wins_from_file = 0, total_losses_from_file = 0, total_draws_from_file = 0;
+    bool games_line_found = false;
+
+    while (getline(resume_file, line))
+    {
+        // Skip empty lines or lines that don't start with "Games" or "Thread"v
+        if (line.rfind("Games", 0) != 0 && line.rfind("Thread", 0) != 0) {
+            continue;
+        }
+
+        stringstream ss(line);
+        string header;
+        char separator;
+        
+        ss >> header;
+
+        if (header == "Games")
+        {
+            string temp;
+            uint n, w, l, d;
+            ss >> separator >> temp >> n >> temp >> w >> temp >> l >> temp >> d;
+            if (ss.fail()) {
+                cout << "Warning: Could not parse 'Games' line: " << line << endl;
+                continue;
+            }
+            total_wins_from_file = w;
+            total_losses_from_file = l;
+            total_draws_from_file = d;
+            games_line_found = true;
+        }
+        else if (header == "Thread")
+        {
+            uint thread_id;
+            string temp;
+            uint n, w, l, d;
+            ss >> thread_id >> separator >> temp >> n >> temp >> w >> temp >> l >> temp >> d;
+            
+            if (ss.fail()) {
+                cout << "Warning: Could not parse 'Thread' line: " << line << endl;
+                continue;
+            }
+
+            if (thread_id < options.num_threads)
+            {
+                m_game_mgr[thread_id].m_engine1_wins = w;
+                m_game_mgr[thread_id].m_engine2_wins = l;
+                m_game_mgr[thread_id].m_draws = d;
+            }
+            else
+            {
+                cout << "Warning: Thread ID " << thread_id << " from resume file is out of bounds for current thread count (" << options.num_threads << "). Ignoring." << endl;
+            }
+        }
+    }
+    
+    resume_file.close();
+    
+    uint wins_check = 0, losses_check = 0, draws_check = 0;
+    for (uint i = 0; i < options.num_threads; ++i) {
+        wins_check += m_game_mgr[i].m_engine1_wins.load(memory_order_relaxed);
+        losses_check += m_game_mgr[i].m_engine2_wins.load(memory_order_relaxed);
+        draws_check += m_game_mgr[i].m_draws.load(memory_order_relaxed);
+    }
+    
+    if (games_line_found && (total_wins_from_file != wins_check || total_losses_from_file != losses_check || total_draws_from_file != draws_check)) {
+        cout << "Warning: Totals from 'Games' line (" << total_wins_from_file << "W " << total_losses_from_file << "L " << total_draws_from_file << "D"
+             << ") do not match sum of 'Thread' lines (" << wins_check << "W " << losses_check << "L " << draws_check << "D"
+             << ").\nUsing sum of thread lines as the source of truth." << endl;
+    }
+
+    m_total_games_started = wins_check + losses_check + draws_check;
+    
+    if (m_total_games_started == 0 && !games_line_found) {
+        cout << "Warning: No game data found in resume file. Starting a new match." << endl;
+    } else {
+        cout << "Resumed state: " << wins_check << " W / " << losses_check << " L / " << draws_check << " D (" << m_total_games_started << " games)" << endl;
+    }
+
+    if (m_total_games_started >= options.num_games_to_play) {
+        cout << "Match already completed according to resume file. " << m_total_games_started << " games played out of " << options.num_games_to_play << "." << endl;
+    } else if (m_total_games_started > 0) {
+        cout << "Will play " << (options.num_games_to_play - m_total_games_started) << " more games." << endl;
+    }
+    
+    return true;
+}
+
 int MatchManager::initialize(void)
 {
    if (options.engine_file_name_1.empty() || options.engine_file_name_2.empty())
@@ -447,6 +546,15 @@ int MatchManager::initialize(void)
         << ", E-cores: " << m_available_e_cores.size() 
         << ", Generic cores: " << m_available_generic_cores.size() << endl;
 
+   m_game_mgr = new GameManager[options.num_threads];
+   m_thread = new thread[options.num_threads];
+
+   if (!options.resume_filename.empty()) {
+       if (!load_state_from_resume_file()) {
+           return 0; // Abort if loading state fails
+       }
+   }
+
    m_sprt_enabled = options.sprt_enabled;
    if (m_sprt_enabled) {
        m_sprt_elo0 = options.sprt_elo0;
@@ -470,6 +578,18 @@ int MatchManager::initialize(void)
          cout << "Error: could not open FEN file " << options.fens_filename << "\n";
          return 0;
       }
+      // If resuming, skip already played FENs
+      if (!options.resume_filename.empty() && m_total_games_started > 0) {
+          uint fens_to_skip = m_total_games_started / 2;
+          cout << "Skipping " << fens_to_skip << " FENs from the beginning of the file." << endl;
+          string dummy;
+          for (uint i = 0; i < fens_to_skip; ++i) {
+              if (!getline(m_FENs_file, dummy)) {
+                  cout << "Warning: Reached end of FEN file while skipping." << endl;
+                  break;
+              }
+          }
+      }
    }
 
    if (!options.pgn_filename.empty() && !options.pgn4_filename.empty())
@@ -482,7 +602,16 @@ int MatchManager::initialize(void)
    {
       options.pgn4_format = options.pgn_filename.empty();
       string filename = (options.pgn4_format) ? options.pgn4_filename : options.pgn_filename;
-      m_pgn_file.open(filename, ios::out);
+
+      ios_base::openmode mode = ios::out;
+      if (!options.resume_filename.empty() && m_total_games_started > 0) {
+          mode |= ios::app; // Append if resuming
+          cout << "Appending new games to " << filename << endl;
+      } else {
+          mode |= ios::trunc; // Overwrite if not resuming
+      }
+      
+      m_pgn_file.open(filename, mode);
       if (!m_pgn_file.is_open())
       {
          cout << "Error: could not open PGN file " << filename << "\n";
@@ -498,9 +627,6 @@ int MatchManager::initialize(void)
    {
       cout << "Warning: could not open results_log.txt for writing.\n";
    }
-
-   m_game_mgr = new GameManager[options.num_threads];
-   m_thread = new thread[options.num_threads];
 
    return 1;
 }
@@ -818,6 +944,7 @@ int parse_cmd_line_options(int argc, char* argv[])
       po::options_description desc("Command line options");
       desc.add_options()
          ("help",      "print help message")
+         ("resume",    po::value<string>(&options.resume_filename), "Resume a match from a results.txt file")
          ("e1",         po::value<string>(&options.engine_file_name_1), "first engine's file name")
          ("e2",         po::value<string>(&options.engine_file_name_2), "second engine's file name")
          ("x1",         "first engine uses xboard protocol. (UCI is the default protocol.)")

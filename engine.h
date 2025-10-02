@@ -151,6 +151,9 @@ struct options_info
    string pgn_filename;
    string pgn4_filename;
 
+   // Resume option
+   string resume_filename;
+
    // SPRT options
    bool sprt_enabled;
    double sprt_elo0;

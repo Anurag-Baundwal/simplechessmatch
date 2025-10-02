@@ -84,4 +84,5 @@ private:
    void parse_core_list(const string& core_str, vector<int>& core_vec);
    void return_cores_to_pool(const string& core_list_str);
    bool allocate_cores_for_game(string& shared_core_list);
+   bool load_state_from_resume_file();
 };
