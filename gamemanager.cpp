@@ -80,17 +80,25 @@ void GameManager::game_runner(void)
    m_thread_running = false;
 }
 
-game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chrono::milliseconds increment_ms, chrono::milliseconds fixed_time_ms)
+game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chrono::milliseconds increment_ms, chrono::milliseconds fixed_time_ms_global)
 {
    chrono::milliseconds elapsed_time_ms;
    game_result result = UNFINISHED;
    Engine *white_engine;
    Engine *black_engine;
 
+   // Determine per-engine fixed time, using --fixed1/--fixed2 if available, otherwise fallback to global --fixed
+   chrono::milliseconds fixed_time_e1 = (options.tc_fixed_time_move_ms_1 > 0) ? chrono::milliseconds(options.tc_fixed_time_move_ms_1) : fixed_time_ms_global;
+   chrono::milliseconds fixed_time_e2 = (options.tc_fixed_time_move_ms_2 > 0) ? chrono::milliseconds(options.tc_fixed_time_move_ms_2) : fixed_time_ms_global;
+
+   chrono::milliseconds fixed_time_white, fixed_time_black;
+
    if (m_swap_sides)
    {
       white_engine = &m_engine2;
       black_engine = &m_engine1;
+      fixed_time_white = fixed_time_e2;
+      fixed_time_black = fixed_time_e1;
       white_engine->set_affinity(m_core_for_engine2);
       black_engine->set_affinity(m_core_for_engine1);
    }
@@ -98,32 +106,26 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
    {
       white_engine = &m_engine1;
       black_engine = &m_engine2;
+      fixed_time_white = fixed_time_e1;
+      fixed_time_black = fixed_time_e2;
       white_engine->set_affinity(m_core_for_engine1);
       black_engine->set_affinity(m_core_for_engine2);
    }
 
-   if (fixed_time_ms.count())
-   {
-      m_white_clock_ms = fixed_time_ms;
-      m_black_clock_ms = fixed_time_ms;
-   }
-   else
-   {
-      m_white_clock_ms = start_time_ms;
-      m_black_clock_ms = start_time_ms;
-   }
+   m_white_clock_ms = fixed_time_white.count() ? fixed_time_white : start_time_ms;
+   m_black_clock_ms = fixed_time_black.count() ? fixed_time_black : start_time_ms;
 
    this_thread::sleep_for(100ms);
 
    m_turn = get_color_to_move_from_fen(m_fen);
 
-   if (white_engine->engine_new_game_setup(WHITE, m_turn, start_time_ms.count(), increment_ms.count(), fixed_time_ms.count(), m_fen, options.variant) == 0)
+   if (white_engine->engine_new_game_setup(WHITE, m_turn, start_time_ms.count(), increment_ms.count(), fixed_time_white.count(), m_fen, options.variant) == 0)
    {
       if (!white_engine->m_quit_cmd_sent)
          cout << "Error: " << white_engine->m_name << " could not start a new game.\n";
       return ERROR_ENGINE_DISCONNECTED;
    }
-   if (black_engine->engine_new_game_setup(BLACK, m_turn, start_time_ms.count(), increment_ms.count(), fixed_time_ms.count(), m_fen, options.variant) == 0)
+   if (black_engine->engine_new_game_setup(BLACK, m_turn, start_time_ms.count(), increment_ms.count(), fixed_time_black.count(), m_fen, options.variant) == 0)
    {
       if (!black_engine->m_quit_cmd_sent)
          cout << "Error: " << black_engine->m_name << " could not start a new game.\n";
@@ -133,9 +135,9 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
    this_thread::sleep_for(100ms);
 
    if (m_turn == WHITE)
-      white_engine->engine_new_game_start(start_time_ms.count(), increment_ms.count(), fixed_time_ms.count());
+      white_engine->engine_new_game_start(start_time_ms.count(), increment_ms.count(), fixed_time_white.count());
    else
-      black_engine->engine_new_game_start(start_time_ms.count(), increment_ms.count(), fixed_time_ms.count());
+      black_engine->engine_new_game_start(start_time_ms.count(), increment_ms.count(), fixed_time_black.count());
 
    m_timestamp = chrono::steady_clock::now();
 
@@ -164,7 +166,7 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          bool is_engine1_turn = (white_engine == &m_engine1);
          if ((is_engine1_turn && options.ponder1) || (!is_engine1_turn && options.ponder2))
          {
-            white_engine->do_ponder_search(fixed_time_ms);
+            white_engine->do_ponder_search(fixed_time_white);
          }
          // --- END PONDER LOGIC ---
 
@@ -177,10 +179,10 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
             result = BLACK_WIN;
             break;
          }
-         m_white_clock_ms = (fixed_time_ms.count() ? (fixed_time_ms) : (m_white_clock_ms + increment_ms));
+         m_white_clock_ms = (fixed_time_white.count() ? (fixed_time_white) : (m_white_clock_ms + increment_ms));
 
          move_played(white_engine->m_move);
-         black_engine->send_move_and_clocks_to_engine(white_engine->m_move, m_fen, m_move_list, m_black_clock_ms.count(), m_white_clock_ms.count(), increment_ms.count(), fixed_time_ms.count());
+         black_engine->send_move_and_clocks_to_engine(white_engine->m_move, m_fen, m_move_list, m_black_clock_ms.count(), m_white_clock_ms.count(), increment_ms.count(), fixed_time_black.count());
          m_timestamp = chrono::steady_clock::now();
          if (options.print_moves)
             cout << "white moved: " << white_engine->m_move << ",   elapsed: " << elapsed_time_ms.count() << " ms,   white clock: "
@@ -202,7 +204,7 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          bool is_engine1_turn = (black_engine == &m_engine1);
          if ((is_engine1_turn && options.ponder1) || (!is_engine1_turn && options.ponder2))
          {
-             black_engine->do_ponder_search(fixed_time_ms);
+             black_engine->do_ponder_search(fixed_time_black);
          }
          // --- END PONDER LOGIC ---
 
@@ -215,10 +217,10 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
             result = WHITE_WIN;
             break;
          }
-         m_black_clock_ms = (fixed_time_ms.count() ? (fixed_time_ms) : (m_black_clock_ms + increment_ms));
+         m_black_clock_ms = (fixed_time_black.count() ? (fixed_time_black) : (m_black_clock_ms + increment_ms));
 
          move_played(black_engine->m_move);
-         white_engine->send_move_and_clocks_to_engine(black_engine->m_move, m_fen, m_move_list, m_white_clock_ms.count(), m_black_clock_ms.count(), increment_ms.count(), fixed_time_ms.count());
+         white_engine->send_move_and_clocks_to_engine(black_engine->m_move, m_fen, m_move_list, m_white_clock_ms.count(), m_black_clock_ms.count(), increment_ms.count(), fixed_time_white.count());
          m_timestamp = chrono::steady_clock::now();
          if (options.print_moves)
             cout << "black moved: " << black_engine->m_move << ",   elapsed: " << elapsed_time_ms.count() << " ms,   black clock: "
