@@ -825,10 +825,22 @@ void MatchManager::print_results(void)
        // SPRT
        if (m_sprt_enabled) {
           stringstream tc_ss;
-          if (options.tc_fixed_time_move_ms > 0) {
-              tc_ss << fixed << setprecision(2) << (float)options.tc_fixed_time_move_ms / 1000.0 << "s";
-          } else {
-              tc_ss << options.tc_ms / 1000 << "+" << fixed << setprecision(2) << (float)options.tc_inc_ms / 1000.0;
+          tc_ss << fixed << setprecision(2);
+          // Check for odds match first
+          if (options.tc_fixed_time_move_ms_1 > 0 || options.tc_fixed_time_move_ms_2 > 0)
+          {
+            // If a specific time isn't set, it falls back to the global fixed time (which could be 0)
+            float time1_s = ((options.tc_fixed_time_move_ms_1 > 0) ? options.tc_fixed_time_move_ms_1 : options.tc_fixed_time_move_ms) / 1000.0f;
+            float time2_s = ((options.tc_fixed_time_move_ms_2 > 0) ? options.tc_fixed_time_move_ms_2 : options.tc_fixed_time_move_ms) / 1000.0f;
+            tc_ss << time1_s << "s vs " << time2_s << "s";
+          }
+          else if (options.tc_fixed_time_move_ms > 0) 
+          {
+              tc_ss << (float)options.tc_fixed_time_move_ms / 1000.0 << "s";
+          } 
+          else 
+          {
+              tc_ss << options.tc_ms / 1000 << "+" << (float)options.tc_inc_ms / 1000.0;
           }
           string tc_str = tc_ss.str();
       
