@@ -282,7 +282,7 @@ bool MatchManager::allocate_cores_for_game(string& shared_core_list)
     // Case 1: P/E cores are defined by user, apply tiered allocation.
     if (!m_p_core_list.empty() || !m_e_core_list.empty())
     {
-        uint total_p_available = m_available_physical_p_cores.size() + m_available_logical_p_cores.size();
+        uint total_p_available = (uint)(m_available_physical_p_cores.size() + m_available_logical_p_cores.size());
         
         // Priority 1: Try to allocate from P-cores only.
         if (total_p_available >= cores_needed_per_game) {
@@ -588,7 +588,7 @@ int MatchManager::initialize(void)
 
    // Dynamically reduce thread count if not enough cores are available for the requested concurrency.
    uint cores_per_game = options.num_cores_1;
-   uint total_cores_in_pool = m_available_physical_p_cores.size() + m_available_logical_p_cores.size() + m_available_e_cores.size() + m_available_generic_cores.size();
+   uint total_cores_in_pool = (uint)(m_available_physical_p_cores.size() + m_available_logical_p_cores.size() + m_available_e_cores.size() + m_available_generic_cores.size());
 
    if (cores_per_game > 0 && total_cores_in_pool < options.num_threads * cores_per_game) {
        uint old_threads = options.num_threads;
