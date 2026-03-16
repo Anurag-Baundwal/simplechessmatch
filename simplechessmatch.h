@@ -18,6 +18,11 @@
 
 #define MAX_THREADS 32
 
+struct PairResult {
+   int finished_games = 0;
+   double engine1_score = 0.0;
+};
+
 // Forward declarations
 int parse_cmd_line_options(int argc, char* argv[]);
 #ifdef WIN32
@@ -62,6 +67,11 @@ private:
    double m_sprt_upper_bound;
    double m_sprt_llr;
    bool m_sprt_test_finished;
+
+   // Pentanomial related members
+   vector<PairResult> m_pair_results;
+   int m_penta[5]; // Indices: 0=LL, 1=LD, 2=WL/DD, 3=WD, 4=WW
+   int m_completed_pairs;
 
 public:
    MatchManager(void);

@@ -25,6 +25,9 @@ GameManager::GameManager(void)
    m_move_list.reserve(1000);
    m_core_for_engine1 = "";
    m_core_for_engine2 = "";
+   m_pair_id = 0;
+   m_final_result = UNFINISHED;
+   m_is_valid_game = false;
 }
 
 GameManager::~GameManager(void)
@@ -77,6 +80,8 @@ void GameManager::game_runner(void)
          cout << "\n" << m_pgn << "\n";
    }
 
+   m_final_result = result;
+   m_is_valid_game = ((result == WHITE_WIN) || (result == BLACK_WIN) || (result == DRAW));
    m_thread_running = false;
 }
 

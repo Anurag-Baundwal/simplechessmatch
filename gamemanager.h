@@ -24,6 +24,9 @@ public:
    atomic<bool> m_pgn_valid;
    string m_core_for_engine1; // Core(s) for engine 1 in this game
    string m_core_for_engine2; // Core(s) for engine 2 in this game
+   uint m_pair_id;
+   game_result m_final_result;
+   bool m_is_valid_game;
 
 private:
    string m_move_list;

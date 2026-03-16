@@ -124,6 +124,37 @@ void MatchManager::main_loop(void)
             if (m_thread[i].joinable())
             {
                m_thread[i].join();
+
+               // --- Pentanomial processing logic ---
+               if (m_game_mgr[i].m_is_valid_game) {
+                  double e1_score = 0.5;
+                  if ((m_game_mgr[i].m_final_result == WHITE_WIN && !m_game_mgr[i].m_swap_sides) ||
+                      (m_game_mgr[i].m_final_result == BLACK_WIN && m_game_mgr[i].m_swap_sides)) {
+                     e1_score = 1.0;
+                  } else if ((m_game_mgr[i].m_final_result == BLACK_WIN && !m_game_mgr[i].m_swap_sides) ||
+                             (m_game_mgr[i].m_final_result == WHITE_WIN && m_game_mgr[i].m_swap_sides)) {
+                     e1_score = 0.0;
+                  }
+
+                  uint pid = m_game_mgr[i].m_pair_id;
+                  if (pid < m_pair_results.size()) {
+                     m_pair_results[pid].engine1_score += e1_score;
+                     m_pair_results[pid].finished_games++;
+
+                     if (m_pair_results[pid].finished_games == 2) {
+                        double total = m_pair_results[pid].engine1_score;
+                        if (total == 0.0) m_penta[0]++;
+                        else if (total == 0.5) m_penta[1]++;
+                        else if (total == 1.0) m_penta[2]++;
+                        else if (total == 1.5) m_penta[3]++;
+                        else if (total == 2.0) m_penta[4]++;
+                        
+                        m_completed_pairs++;
+                     }
+                  }
+               }
+               // ------------------------------------
+
                // Return the cores used by the finished game to the available pool.
                return_cores_to_pool(m_game_mgr[i].m_core_for_engine1);
                m_game_mgr[i].m_core_for_engine1 = "";
@@ -150,6 +181,7 @@ void MatchManager::main_loop(void)
 
             m_game_mgr[i].m_fen = fen;
             m_game_mgr[i].m_swap_sides = swap_sides;
+            m_game_mgr[i].m_pair_id = m_total_games_started / 2;
             swap_sides = !swap_sides;
             
             m_game_mgr[i].m_core_for_engine1 = shared_core_list;
@@ -370,6 +402,7 @@ bool MatchManager::load_state_from_resume_file()
     string line;
     uint total_wins_from_file = 0, total_losses_from_file = 0, total_draws_from_file = 0;
     bool games_line_found = false;
+    bool pentanomial_found = false;
 
     while (getline(resume_file, line))
     {
@@ -421,6 +454,16 @@ bool MatchManager::load_state_from_resume_file()
                 cout << "Warning: Thread ID " << thread_id << " from resume file is out of bounds for current thread count (" << options.num_threads << "). Ignoring." << endl;
             }
         }
+        else if (header == "Penta")
+        {
+            ss >> separator >> m_penta[0] >> m_penta[1] >> m_penta[2] >> m_penta[3] >> m_penta[4];
+            if (ss.fail()) {
+                cout << "Warning: Could not parse 'Penta' line: " << line << endl;
+                continue;
+            }
+            m_completed_pairs = m_penta[0] + m_penta[1] + m_penta[2] + m_penta[3] + m_penta[4];
+            pentanomial_found = true;
+        }
     }
     
     resume_file.close();
@@ -452,6 +495,24 @@ bool MatchManager::load_state_from_resume_file()
         cout << "Will play " << (options.num_games_to_play - m_total_games_started) << " more games." << endl;
     }
     
+    if (!pentanomial_found && m_total_games_started > 0) {
+        cout << "Warning: Resume file missing Pentanomial data. Synthesizing safe distribution from totals." << endl;
+        double W = (m_total_games_started > 0) ? (double)wins_check / m_total_games_started : 0;
+        double L = (m_total_games_started > 0) ? (double)losses_check / m_total_games_started : 0;
+        double D = (m_total_games_started > 0) ? (double)draws_check / m_total_games_started : 0;
+        int pairs = m_total_games_started / 2;
+        m_completed_pairs = pairs;
+        m_penta[0] = (int)round(pairs * L * L);
+        m_penta[1] = (int)round(pairs * 2 * L * D);
+        m_penta[2] = (int)round(pairs * (2 * W * L + D * D));
+        m_penta[3] = (int)round(pairs * 2 * W * D);
+        m_penta[4] = (int)round(pairs * W * W);
+        
+        // Ensure total equals expected pairs
+        int sum = m_penta[0] + m_penta[1] + m_penta[2] + m_penta[3] + m_penta[4];
+        if (sum < pairs) m_penta[2] += (pairs - sum);
+        else if (sum > pairs) m_penta[2] -= (sum - pairs);
+    }
     return true;
 }
 
@@ -545,6 +606,14 @@ int MatchManager::initialize(void)
         << ", Logical P-cores: " << m_available_logical_p_cores.size()
         << ", E-cores: " << m_available_e_cores.size() 
         << ", Generic cores: " << m_available_generic_cores.size() << endl;
+
+   if (options.num_games_to_play % 2 != 0) {
+       options.num_games_to_play++;
+       cout << "Adjusted total games to " << options.num_games_to_play << " to ensure complete game pairs." << endl;
+   }
+   m_pair_results.resize(options.num_games_to_play / 2 + 1);
+   m_completed_pairs = 0;
+   for (int i = 0; i < 5; i++) m_penta[i] = 0;
 
    m_game_mgr = new GameManager[options.num_threads];
    m_thread = new thread[options.num_threads];
@@ -746,112 +815,84 @@ void MatchManager::print_results(void)
       engine2_losses_on_time += m_game_mgr[i].m_engine2_losses_on_time.load(memory_order_relaxed);
    }
    
-   int N = engine1_wins + engine2_wins + draws;
+   int N_games = engine1_wins + engine2_wins + draws;
+   int N_pairs = m_completed_pairs;
 
    static int last_total_games_completed = -1;
    int total_games_completed = m_total_games_started - num_games_in_progress();
-   if (total_games_completed == last_total_games_completed && N > 0)
+   if (total_games_completed == last_total_games_completed && N_games > 0)
       return;
    last_total_games_completed = total_games_completed;
 
-   // Update SPRT
-   if (m_sprt_enabled && !m_sprt_test_finished && N > 0) {
-       // Probabilities under H0 (elo = elo0)
-       double E0 = elo_to_score(m_sprt_elo0);
-       // Probabilities under H1 (elo = elo1)
-       double E1 = elo_to_score(m_sprt_elo1);
-
-       // Estimate the probability of a draw from the match data.
-       double P_draw = (double)draws / N;
-
-       // Probabilities of win, loss, draw for H0
-       double w0 = E0 - P_draw / 2.0;
-       double l0 = 1.0 - E0 - P_draw / 2.0;
-       
-       // Probabilities of win, loss, draw for H1
-       double w1 = E1 - P_draw / 2.0;
-       double l1 = 1.0 - E1 - P_draw / 2.0;
-
-       // To avoid log(0) for w,l in case of 100% draw rate or no wins/losses yet
-       if (w0 <= 0) w0 = 1e-9;
-       if (l0 <= 0) l0 = 1e-9;
-       if (w1 <= 0) w1 = 1e-9;
-       if (l1 <= 0) l1 = 1e-9;
-
-       // Use the correct trinomial LLR formula.
-       // We can ignore the draw term if we assume P(draw) is independent of elo, because log(d1/d0) = log(P_draw/P_draw) = log(1) = 0.
-       // This is a common and safe assumption for small elo differences.
-       m_sprt_llr = (double)engine1_wins * log(w1 / w0) +
-                    (double)engine2_wins * log(l1 / l0);
-       // The full formula would be:
-       // m_sprt_llr = (double)engine1_wins * log(w1 / w0) +
-       //              (double)engine2_wins * log(l1 / l0) +
-       //              (double)draws * log(d1 / d0); // This term is 0 with our assumption.
-
-       if (m_sprt_llr > m_sprt_upper_bound) {
-           m_sprt_test_finished = true;
-       } else if (m_sprt_llr < m_sprt_lower_bound) {
-           m_sprt_test_finished = true;
-       }
-   }
-   
-   // --- Build the output string ---
    stringstream ss_output;
-
    ss_output << "Engine1: " << options.engine_file_name_1 << " vs Engine2: " << options.engine_file_name_2 << "\n\n";
 
-   if (N == 0) {
-       ss_output << "No games completed yet." << endl;
+   if (N_pairs == 0) {
+       ss_output << "No game pairs completed yet." << endl;
    } else {
-       double score = (double)(engine1_wins + (double)draws / 2.0) / N;
-   
+       double sum_P = 0.0;
+       double sum_P2 = 0.0;
+       for (int k = 0; k < 5; ++k) {
+           double P = k * 0.5; // Pair score outcomes: 0.0, 0.5, 1.0, 1.5, 2.0
+           double count = m_penta[k];
+           sum_P += count * P;
+           sum_P2 += count * P * P;
+       }
+       double mean_P = sum_P / N_pairs;
+       double var_P = (sum_P2 / N_pairs) - (mean_P * mean_P);
+       double score = mean_P / 2.0;
+
        ss_output << fixed << setprecision(2);
-   
+
        // Elo
        if (score <= 1e-9 || score >= 1.0 - 1e-9) {
            ss_output << "Elo   | " << (score > 0.5 ? "+inf" : "-inf") << endl;
        } else {
-           double elo_diff = -400.0 * log10(1.0 / score - 1.0);
-           double win_frac = (double)engine1_wins / N;
-           double draw_frac = (double)draws / N;
-           double variance_of_score = (win_frac + 0.25 * draw_frac - score * score);
-           double std_error_of_mean_score = sqrt(variance_of_score / N);
+           double var_per_game = var_P / 4.0;
+           double std_error_of_mean_score = sqrt(var_per_game / N_pairs);
            double elo_per_score = 400.0 / (score * (1.0 - score) * log(10.0));
            double std_error_of_elo = elo_per_score * std_error_of_mean_score;
            double elo_margin = 1.96 * std_error_of_elo;
+           double elo_diff = -400.0 * log10(1.0 / score - 1.0);
            ss_output << "Elo   | " << elo_diff << " +- " << elo_margin << " (95%)" << endl;
        }
-   
+
        // SPRT
        if (m_sprt_enabled) {
           stringstream tc_ss;
           tc_ss << fixed << setprecision(2);
-          // Check for odds match first
-          if (options.tc_fixed_time_move_ms_1 > 0 || options.tc_fixed_time_move_ms_2 > 0)
-          {
-            // If a specific time isn't set, it falls back to the global fixed time (which could be 0)
+          if (options.tc_fixed_time_move_ms_1 > 0 || options.tc_fixed_time_move_ms_2 > 0) {
             float time1_s = ((options.tc_fixed_time_move_ms_1 > 0) ? options.tc_fixed_time_move_ms_1 : options.tc_fixed_time_move_ms) / 1000.0f;
             float time2_s = ((options.tc_fixed_time_move_ms_2 > 0) ? options.tc_fixed_time_move_ms_2 : options.tc_fixed_time_move_ms) / 1000.0f;
             tc_ss << time1_s << "s vs " << time2_s << "s";
-          }
-          else if (options.tc_fixed_time_move_ms > 0) 
-          {
+          } else if (options.tc_fixed_time_move_ms > 0) {
               tc_ss << (float)options.tc_fixed_time_move_ms / 1000.0 << "s";
-          } 
-          else 
-          {
+          } else {
               tc_ss << options.tc_ms / 1000 << "+" << (float)options.tc_inc_ms / 1000.0;
           }
           string tc_str = tc_ss.str();
       
           ss_output << "SPRT  | " << options.sprt_elo1 << " " << tc_str << " Threads=" << options.num_threads << " Hash=" << options.mem_size_1 << "MB" << endl;
+
+          // LLR calculation using Brownian Motion approximation (Cutechess standard)
+          double E0 = elo_to_score(m_sprt_elo0);
+          double E1 = elo_to_score(m_sprt_elo1);
+          if (var_P > 1e-9) {
+              m_sprt_llr = (4.0 * N_pairs / var_P) * (E1 - E0) * (score - (E0 + E1) / 2.0);
+          } else {
+              m_sprt_llr = 0.0;
+          }
+
           ss_output << "LLR   | " << m_sprt_llr << " (" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << ") [" 
                << m_sprt_elo0 << ", " << m_sprt_elo1 << "]" << endl;
+
+          if (!m_sprt_test_finished && m_sprt_llr > m_sprt_upper_bound) m_sprt_test_finished = true;
+          else if (!m_sprt_test_finished && m_sprt_llr < m_sprt_lower_bound) m_sprt_test_finished = true;
        }
-   
+
        // Games
-       ss_output << "Games | N: " << N << " W: " << engine1_wins << " L: " << engine2_wins << " D: " << draws << endl;
-   
+       ss_output << "Games | N: " << N_games << " W: " << engine1_wins << " L: " << engine2_wins << " D: " << draws << endl;
+       ss_output << "Penta | " << m_penta[0] << " " << m_penta[1] << " " << m_penta[2] << " " << m_penta[3] << " " << m_penta[4] << endl;
        ss_output << endl;
 
        // Per-thread stats
