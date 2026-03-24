@@ -406,8 +406,8 @@ bool MatchManager::load_state_from_resume_file()
 
     while (getline(resume_file, line))
     {
-        // Skip empty lines or lines that don't start with "Games" or "Thread"v
-        if (line.rfind("Games", 0) != 0 && line.rfind("Thread", 0) != 0) {
+        // Skip empty lines or lines that don't start with "Games" or "Thread" or "Penta"
+        if (line.rfind("Games", 0) != 0 && line.rfind("Thread", 0) != 0 && line.rfind("Penta", 0) != 0) {
             continue;
         }
 
@@ -482,6 +482,13 @@ bool MatchManager::load_state_from_resume_file()
     }
 
     m_total_games_started = wins_check + losses_check + draws_check;
+
+    if (m_total_games_started % 2 != 0) {
+        // cout << "Warning: Resuming from an odd number of games. Realigning dispatch counter to protect pair integrity." << endl;
+        // Snap to an even number so the next dispatched game starts a fresh pair properly.
+        // (Note: This doesn't delete the game from the Win/Loss stats, it just resets the pair dispatcher).
+        m_total_games_started -= 1;
+    }
     
     if (m_total_games_started == 0 && !games_line_found) {
         cout << "Warning: No game data found in resume file. Starting a new match." << endl;
@@ -497,16 +504,25 @@ bool MatchManager::load_state_from_resume_file()
     
     if (!pentanomial_found && m_total_games_started > 0) {
         cout << "Warning: Resume file missing Pentanomial data. Synthesizing safe distribution from totals." << endl;
-        double W = (m_total_games_started > 0) ? (double)wins_check / m_total_games_started : 0;
-        double L = (m_total_games_started > 0) ? (double)losses_check / m_total_games_started : 0;
-        double D = (m_total_games_started > 0) ? (double)draws_check / m_total_games_started : 0;
+        
+        // Since m_total_games_started may have been decremented by 1 to realign game pairs
+        // when resuming from odd game counts, we must recalculate the true number of games played. 
+        // If we divide by the adjusted value, our win/loss/draw probabilities will exceed 1.0 (100%).
+        // We use the unadjusted sum here to synthesize an accurate pentanomial distribution.
+        uint unadjusted_game_total = wins_check + losses_check + draws_check;
+        
+        double win_rate = (unadjusted_game_total > 0) ? (double)wins_check / unadjusted_game_total : 0.0;
+        double loss_rate = (unadjusted_game_total > 0) ? (double)losses_check / unadjusted_game_total : 0.0;
+        double draw_rate = (unadjusted_game_total > 0) ? (double)draws_check / unadjusted_game_total : 0.0;
+        
         int pairs = m_total_games_started / 2;
         m_completed_pairs = pairs;
-        m_penta[0] = (int)round(pairs * L * L);
-        m_penta[1] = (int)round(pairs * 2 * L * D);
-        m_penta[2] = (int)round(pairs * (2 * W * L + D * D));
-        m_penta[3] = (int)round(pairs * 2 * W * D);
-        m_penta[4] = (int)round(pairs * W * W);
+        
+        m_penta[0] = (int)round(pairs * loss_rate * loss_rate);
+        m_penta[1] = (int)round(pairs * 2 * loss_rate * draw_rate);
+        m_penta[2] = (int)round(pairs * (2 * win_rate * loss_rate + draw_rate * draw_rate));
+        m_penta[3] = (int)round(pairs * 2 * win_rate * draw_rate);
+        m_penta[4] = (int)round(pairs * win_rate * win_rate);
         
         // Ensure total equals expected pairs
         int sum = m_penta[0] + m_penta[1] + m_penta[2] + m_penta[3] + m_penta[4];
