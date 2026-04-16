@@ -114,17 +114,51 @@ void MatchManager::main_loop(void)
          if (m_game_mgr[i].m_thread_running == 0)
          {
             if (m_thread[i].joinable())
+            {
                m_thread[i].join();
+
+               // --- Pentanomial processing logic ---
+               if (m_game_mgr[i].m_is_valid_game) {
+                  double e1_score = 0.5;
+                  if ((m_game_mgr[i].m_final_result == WHITE_WIN && !m_game_mgr[i].m_swap_sides) ||
+                      (m_game_mgr[i].m_final_result == BLACK_WIN && m_game_mgr[i].m_swap_sides)) {
+                     e1_score = 1.0;
+                  } else if ((m_game_mgr[i].m_final_result == BLACK_WIN && !m_game_mgr[i].m_swap_sides) ||
+                             (m_game_mgr[i].m_final_result == WHITE_WIN && m_game_mgr[i].m_swap_sides)) {
+                     e1_score = 0.0;
+                  }
+
+                  uint pid = m_game_mgr[i].m_pair_id;
+                  if (pid < m_pair_results.size()) {
+                     m_pair_results[pid].engine1_score += e1_score;
+                     m_pair_results[pid].finished_games++;
+
+                     if (m_pair_results[pid].finished_games == 2) {
+                        double total = m_pair_results[pid].engine1_score;
+                        if (total == 0.0) m_penta[0]++;
+                        else if (total == 0.5) m_penta[1]++;
+                        else if (total == 1.0) m_penta[2]++;
+                        else if (total == 1.5) m_penta[3]++;
+                        else if (total == 2.0) m_penta[4]++;
+                        
+                        m_completed_pairs++;
+                     }
+                  }
+               }
+               // ------------------------------------
+            }
 
             if (!swap_sides)
                if (get_next_fen(fen) == 0)
                {
-                  // If we run out of FENs but not games, stop the match
                   options.num_games_to_play = m_total_games_started;
                   break; 
                }
             m_game_mgr[i].m_fen = fen;
             m_game_mgr[i].m_swap_sides = swap_sides;
+            
+            m_game_mgr[i].m_pair_id = m_total_games_started / 2;
+            
             swap_sides = !swap_sides;
 
             m_game_mgr[i].m_thread_running = true;
@@ -132,7 +166,7 @@ void MatchManager::main_loop(void)
             m_total_games_started++;
          }
       }
-
+      
       // This loop waits for threads to finish and prints updates
       bool all_threads_busy_or_match_done = !new_game_can_start() || (m_total_games_started >= options.num_games_to_play);
       while (all_threads_busy_or_match_done && !match_completed())
@@ -238,6 +272,14 @@ int MatchManager::initialize(void)
    {
       cout << "Warning: could not open results_log.txt for writing.\n";
    }
+
+   if (options.num_games_to_play % 2 != 0) {
+       options.num_games_to_play++;
+       cout << "Adjusted total games to " << options.num_games_to_play << " to ensure complete game pairs.\n";
+   }
+   m_pair_results.resize(options.num_games_to_play / 2 + 1);
+   m_completed_pairs = 0;
+   for (int i = 0; i < 5; i++) m_penta[i] = 0;
 
    m_game_mgr = new GameManager[options.num_threads];
    m_thread = new thread[options.num_threads];
@@ -359,67 +401,32 @@ void MatchManager::print_results(void)
       engine2_losses_on_time += m_game_mgr[i].m_engine2_losses_on_time;
    }
    
-   int N = engine1_wins + engine2_wins + draws;
+   int N_games = engine1_wins + engine2_wins + draws;
+   int N_pairs = m_completed_pairs;
 
    static int last_total_games_completed = -1;
    int total_games_completed = m_total_games_started - num_games_in_progress();
-   if (total_games_completed == last_total_games_completed && N > 0)
+   if (total_games_completed == last_total_games_completed && N_games > 0)
       return;
    last_total_games_completed = total_games_completed;
 
-   // Update SPRT
-   if (m_sprt_enabled && !m_sprt_test_finished && N > 0) {
-       // Probabilities under H0 (elo = elo0)
-       double E0 = elo_to_score(m_sprt_elo0);
-       // Probabilities under H1 (elo = elo1)
-       double E1 = elo_to_score(m_sprt_elo1);
-
-       // Estimate the probability of a draw from the match data.
-       // Add a small epsilon to avoid division by zero or log(0) if N=0 or draws=0
-       double P_draw = (double)draws / N;
-
-       // Probabilities of win, loss, draw for H0
-       double w0 = E0 - P_draw / 2.0;
-       double l0 = 1.0 - E0 - P_draw / 2.0;
-       double d0 = P_draw;
-
-       // Probabilities of win, loss, draw for H1
-       double w1 = E1 - P_draw / 2.0;
-       double l1 = 1.0 - E1 - P_draw / 2.0;
-       double d1 = P_draw;
-
-       // To avoid log(0) for w,l in case of 100% draw rate
-       if (w0 <= 0) w0 = 1e-9;
-       if (l0 <= 0) l0 = 1e-9;
-       if (w1 <= 0) w1 = 1e-9;
-       if (l1 <= 0) l1 = 1e-9;
-
-       // Use the correct trinomial LLR formula.
-       // We can ignore the draw term if we assume P(draw) is independent of elo, because log(d1/d0) = log(P_draw/P_draw) = log(1) = 0.
-       // This is a common and safe assumption for small elo differences.
-       m_sprt_llr = (double)engine1_wins * log(w1 / w0) +
-                    (double)engine2_wins * log(l1 / l0);
-       // The full formula would be:
-       // m_sprt_llr = (double)engine1_wins * log(w1 / w0) +
-       //              (double)engine2_wins * log(l1 / l0) +
-       //              (double)draws * log(d1 / d0); // This term is 0 with our assumption.
-
-       if (m_sprt_llr > m_sprt_upper_bound) {
-           m_sprt_test_finished = true;
-       } else if (m_sprt_llr < m_sprt_lower_bound) {
-           m_sprt_test_finished = true;
-       }
-   }
-   
-   // --- Build the output string ---
    stringstream ss_output;
-
    ss_output << "Engine1: " << options.engine_file_name_1 << " vs Engine2: " << options.engine_file_name_2 << "\n\n";
 
-   if (N == 0) {
-       ss_output << "No games completed yet." << endl;
+   if (N_pairs == 0) {
+       ss_output << "No game pairs completed yet." << endl;
    } else {
-       double score = (double)(engine1_wins + (double)draws / 2.0) / N;
+       double sum_P = 0.0;
+       double sum_P2 = 0.0;
+       for (int k = 0; k < 5; ++k) {
+           double P = k * 0.5; // Pair score outcomes: 0.0, 0.5, 1.0, 1.5, 2.0
+           double count = m_penta[k];
+           sum_P += count * P;
+           sum_P2 += count * P * P;
+       }
+       double mean_P = sum_P / N_pairs;
+       double var_P = (sum_P2 / N_pairs) - (mean_P * mean_P);
+       double score = mean_P / 2.0;
    
        ss_output << fixed << setprecision(2);
    
@@ -427,14 +434,12 @@ void MatchManager::print_results(void)
        if (score <= 1e-9 || score >= 1.0 - 1e-9) {
            ss_output << "Elo   | " << (score > 0.5 ? "+inf" : "-inf") << endl;
        } else {
-           double elo_diff = -400.0 * log10(1.0 / score - 1.0);
-           double win_frac = (double)engine1_wins / N;
-           double draw_frac = (double)draws / N;
-           double variance_of_score = (win_frac + 0.25 * draw_frac - score * score);
-           double std_error_of_mean_score = sqrt(variance_of_score / N);
+           double var_per_game = var_P / 4.0;
+           double std_error_of_mean_score = sqrt(var_per_game / N_pairs);
            double elo_per_score = 400.0 / (score * (1.0 - score) * log(10.0));
            double std_error_of_elo = elo_per_score * std_error_of_mean_score;
            double elo_margin = 1.96 * std_error_of_elo;
+           double elo_diff = -400.0 * log10(1.0 / score - 1.0);
            ss_output << "Elo   | " << elo_diff << " +- " << elo_margin << " (95%)" << endl;
        }
    
@@ -449,12 +454,26 @@ void MatchManager::print_results(void)
           string tc_str = tc_ss.str();
       
           ss_output << "SPRT  | " << options.sprt_elo1 << " " << tc_str << " Threads=" << options.num_threads << " Hash=" << options.mem_size_1 << "MB" << endl;
+
+          // LLR calculation using Brownian Motion approximation (Cutechess standard)
+          double E0 = elo_to_score(m_sprt_elo0);
+          double E1 = elo_to_score(m_sprt_elo1);
+          if (var_P > 1e-9) {
+              m_sprt_llr = (4.0 * N_pairs / var_P) * (E1 - E0) * (score - (E0 + E1) / 2.0);
+          } else {
+              m_sprt_llr = 0.0;
+          }
+
           ss_output << "LLR   | " << m_sprt_llr << " (" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << ") [" 
                << m_sprt_elo0 << ", " << m_sprt_elo1 << "]" << endl;
+
+          if (!m_sprt_test_finished && m_sprt_llr > m_sprt_upper_bound) m_sprt_test_finished = true;
+          else if (!m_sprt_test_finished && m_sprt_llr < m_sprt_lower_bound) m_sprt_test_finished = true;
        }
    
-       // Games
-       ss_output << "Games | N: " << N << " W: " << engine1_wins << " L: " << engine2_wins << " D: " << draws << endl;
+       // Games & Penta array
+       ss_output << "Games | N: " << N_games << " W: " << engine1_wins << " L: " << engine2_wins << " D: " << draws << endl;
+       ss_output << "Penta | " << m_penta[0] << " " << m_penta[1] << " " << m_penta[2] << " " << m_penta[3] << " " << m_penta[4] << endl;
    
        // Other info
        stringstream ss;

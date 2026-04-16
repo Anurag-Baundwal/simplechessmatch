@@ -22,6 +22,9 @@ public:
    string m_fen;
    string m_pgn;
    atomic<bool> m_pgn_valid;
+   uint m_pair_id;
+   game_result m_final_result;
+   bool m_is_valid_game;
 
 private:
    string m_move_list;
