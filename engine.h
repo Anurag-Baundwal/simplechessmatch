@@ -14,7 +14,7 @@ typedef unsigned int uint;
 
 enum game_result
 {
-   UNFINISHED,                // game is still ongoing
+   UNFINISHED,                // game is still ongoing / not yet played
    WHITE_WIN,                 // 1-0
    BLACK_WIN,                 // 0-1
    DRAW,                      // 1/2-1/2
@@ -22,7 +22,8 @@ enum game_result
    UNDETERMINED,              // could not determine result
    ERROR_ILLEGAL_MOVE,        // engine reported an illegal move from its opponent
    ERROR_INVALID_POSITION,    // engine reported an invalid FEN position
-   ERROR_ENGINE_DISCONNECTED  // could not read data from engine
+   ERROR_ENGINE_DISCONNECTED, // could not read data from engine
+   IN_PROGRESS                // game is currently being played by a thread (in-memory sentinel only, never written to disk)
 };
 
 enum player_color
@@ -127,7 +128,6 @@ struct options_info
    bool print_moves;
    bool continue_on_error;
    bool fourplayerchess;
-   bool pgn4_format;
    bool early_win;
    bool early_draw;
    uint draw_score;
@@ -141,8 +141,6 @@ struct options_info
    uint max_moves;
    string fens_filename;
    string variant;
-   string pgn_filename;
-   string pgn4_filename;
 
    // SPRT options
    bool sprt_enabled;
@@ -150,4 +148,7 @@ struct options_info
    double sprt_elo1;
    double sprt_alpha;
    double sprt_beta;
+
+   // Resume
+   string resume_filename;
 };

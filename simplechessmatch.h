@@ -3,7 +3,7 @@
 #include <fstream>
 #include <cmath>
 #include <iomanip>
-#include <algorithm> // For std::max
+#include <algorithm>
 #ifdef WIN32
 #include <conio.h>
 #else
@@ -14,10 +14,11 @@
 #endif
 
 #define MAX_THREADS 32
+#define MAX_RETRIES_PER_PAIR 5
 
-struct PairResult {
-   int finished_games = 0;
-   double engine1_score = 0.0;
+struct PairRecord {
+   game_result g1 = UNFINISHED;
+   game_result g2 = UNFINISHED;
 };
 
 int parse_cmd_line_options(int argc, char* argv[]);
@@ -35,10 +36,7 @@ public:
 
 private:
    thread *m_thread;
-   uint m_total_games_started;
    bool m_engines_shut_down;
-   fstream m_FENs_file;
-   fstream m_pgn_file;
    fstream m_results_log_file;
 
    // SPRT related members
@@ -51,8 +49,13 @@ private:
    double m_sprt_upper_bound;
    double m_sprt_llr;
    bool m_sprt_test_finished;
-   
-   vector<PairResult> m_pair_results;
+
+   vector<PairRecord> m_pair_records;
+   vector<string> m_fens_list;
+   uint m_engine1_wins_total;
+   uint m_engine2_wins_total;
+   uint m_draws_total;
+   uint m_illegal_moves_total;
    int m_penta[5]; // Indices: 0=LL, 1=LD, 2=WL/DD, 3=WD, 4=WW
    int m_completed_pairs;
 
@@ -65,13 +68,14 @@ public:
    int load_all_engines(void);
    void set_engine_options(Engine *engine);
    void send_engine_custom_commands(Engine *engine);
-   void print_results(void);
-   void save_pgn(void);
+   void print_results(bool clear_screen = true);
    void shut_down_all_engines(void);
 
 private:
    bool match_completed(void);
    bool new_game_can_start(void);
    uint num_games_in_progress(void);
-   int get_next_fen(string &fen);
+   bool get_next_game(string &fen, bool &swap_sides, uint &pair_id);
+   void update_stats_from_records(void);
+   bool check_for_crashes(void);
 };

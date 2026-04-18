@@ -15,10 +15,10 @@ public:
    uint m_engine1_losses_on_time;
    uint m_engine2_losses_on_time;
    uint m_illegal_move_games;
-   bool m_thread_running;
+   atomic<bool> m_thread_running;
    bool m_swap_sides;
-   bool m_error;
-   bool m_engine_disconnected;
+   atomic<bool> m_error;              // atomic: written by game thread, read by main thread
+   atomic<bool> m_engine_disconnected;// atomic: written by game thread, read by main thread
    string m_fen;
    string m_pgn;
    atomic<bool> m_pgn_valid;
@@ -34,8 +34,7 @@ private:
    uint m_drawish_count;
    bool m_loss_on_time;
    bool m_repetition_draw;
-   chrono::time_point<std::chrono::steady_clock> m_timestamp; // This timestamp is updated whenever either engine's clock should start running.
-                                                              // It's also updated when game_runner starts running.
+   atomic<int64_t> m_timestamp_ns; // nanoseconds since steady_clock epoch; atomic to avoid data race with main thread
    chrono::milliseconds m_white_clock_ms;
    chrono::milliseconds m_black_clock_ms;
 

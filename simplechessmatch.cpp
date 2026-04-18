@@ -22,6 +22,8 @@ int main(int argc, char* argv[])
    sigemptyset(&sig_handler.sa_mask);
    sig_handler.sa_flags = 0;
    sigaction(SIGINT, &sig_handler, NULL);
+   // Prevent crashing on Linux if writing to a broken pipe after an engine crash
+   signal(SIGPIPE, SIG_IGN);
 #endif
 
    if (parse_cmd_line_options(argc, argv) == 0)
@@ -52,8 +54,9 @@ int main(int argc, char* argv[])
    match_mgr.main_loop();
 
    match_mgr.shut_down_all_engines();
-   match_mgr.print_results(); // Final print
-   match_mgr.save_pgn();
+
+   // Do not clear the screen on final print so any crash output remains readable
+   match_mgr.print_results(false);
 
    match_mgr.cleanup();
 
@@ -64,13 +67,24 @@ int main(int argc, char* argv[])
 
 MatchManager::MatchManager(void)
 {
-   m_total_games_started = 0;
    m_engines_shut_down = false;
    m_game_mgr = nullptr;
    m_thread = nullptr;
    m_sprt_enabled = false;
    m_sprt_test_finished = false;
    m_sprt_llr = 0.0;
+   m_sprt_lower_bound = 0.0;
+   m_sprt_upper_bound = 0.0;
+   m_sprt_elo0 = 0.0;
+   m_sprt_elo1 = 0.0;
+   m_sprt_alpha = 0.0;
+   m_sprt_beta = 0.0;
+   m_engine1_wins_total = 0;
+   m_engine2_wins_total = 0;
+   m_draws_total = 0;
+   m_illegal_moves_total = 0;
+   m_completed_pairs = 0;
+   for (int i = 0; i < 5; i++) m_penta[i] = 0;
 }
 
 MatchManager::~MatchManager(void)
@@ -79,10 +93,6 @@ MatchManager::~MatchManager(void)
 
 void MatchManager::cleanup(void)
 {
-   if (m_FENs_file.is_open())
-      m_FENs_file.close();
-   if (m_pgn_file.is_open())
-      m_pgn_file.close();
    if (m_results_log_file.is_open())
       m_results_log_file.close();
 
@@ -96,9 +106,6 @@ void MatchManager::cleanup(void)
 
 void MatchManager::main_loop(void)
 {
-   string fen;
-   bool swap_sides = false;
-
 #if defined(WIN32) || defined(__linux__)
    cout << "\n***** Press any key to exit and terminate match *****\n\n";
 #else
@@ -107,101 +114,127 @@ void MatchManager::main_loop(void)
 
    while (!match_completed())
    {
+      // --- Pass 1: Join any completed threads and record their results. ---
+      bool should_abort = false;
+
       for (uint i = 0; i < options.num_threads; i++)
       {
-         if (!new_game_can_start())
-            break;
-         if (m_game_mgr[i].m_thread_running == 0)
+         if (!m_game_mgr[i].m_thread_running && m_thread[i].joinable())
          {
-            if (m_thread[i].joinable())
+            m_thread[i].join();
+
+            bool was_disconnected = m_game_mgr[i].m_engine_disconnected.exchange(false);
+            bool was_error        = m_game_mgr[i].m_error.exchange(false);
+
+            game_result final_res = m_game_mgr[i].m_final_result;
+            uint pid = m_game_mgr[i].m_pair_id;
+            bool swap_sides = m_game_mgr[i].m_swap_sides;
+
+            bool is_disconnect   = was_disconnected;
+            bool is_recoverable  = was_error && options.continue_on_error && !is_disconnect;
+
+            // Write result to log if the game finished validly, OR if it's a
+            // recoverable error we want to skip over (like illegal move with --continue).
+            if (m_game_mgr[i].m_is_valid_game || is_recoverable)
             {
-               m_thread[i].join();
+               if (!swap_sides) m_pair_records[pid].g1 = final_res;
+               else             m_pair_records[pid].g2 = final_res;
 
-               // --- Pentanomial processing logic ---
-               if (m_game_mgr[i].m_is_valid_game) {
-                  double e1_score = 0.5;
-                  if ((m_game_mgr[i].m_final_result == WHITE_WIN && !m_game_mgr[i].m_swap_sides) ||
-                      (m_game_mgr[i].m_final_result == BLACK_WIN && m_game_mgr[i].m_swap_sides)) {
-                     e1_score = 1.0;
-                  } else if ((m_game_mgr[i].m_final_result == BLACK_WIN && !m_game_mgr[i].m_swap_sides) ||
-                             (m_game_mgr[i].m_final_result == WHITE_WIN && m_game_mgr[i].m_swap_sides)) {
-                     e1_score = 0.0;
-                  }
-
-                  uint pid = m_game_mgr[i].m_pair_id;
-                  if (pid < m_pair_results.size()) {
-                     m_pair_results[pid].engine1_score += e1_score;
-                     m_pair_results[pid].finished_games++;
-
-                     if (m_pair_results[pid].finished_games == 2) {
-                        double total = m_pair_results[pid].engine1_score;
-                        if (total == 0.0) m_penta[0]++;
-                        else if (total == 0.5) m_penta[1]++;
-                        else if (total == 1.0) m_penta[2]++;
-                        else if (total == 1.5) m_penta[3]++;
-                        else if (total == 2.0) m_penta[4]++;
-                        
-                        m_completed_pairs++;
-                     }
-                  }
+               if (m_results_log_file.is_open()) {
+                  m_results_log_file << pid << "," << (swap_sides ? 1 : 0) << "," << (int)final_res << "\n";
+                  m_results_log_file.flush();
                }
-               // ------------------------------------
+
+               update_stats_from_records();
             }
+            else
+            {
+               // It's an unrecoverable error. We do NOT record it to the file.
+               // It stays IN_PROGRESS/UNFINISHED, so when the app crashes out, it will
+               // be retried naturally on the next run with --resume.
+               should_abort = true;
+            }
+         }
+      }
 
-            if (!swap_sides)
-               if (get_next_fen(fen) == 0)
-               {
-                  options.num_games_to_play = m_total_games_started;
-                  break; 
-               }
+      // If a crash happened during Pass 1, abort gracefully.
+      if (should_abort) {
+         cout << "\n[!] Crash or error detected! Aborting match.\n";
+         cout << "Resume from where it left off by adding: --resume results_log.txt\n";
+         return;
+      }
+
+      // --- Pass 2: Abort if any thread is frozen/unresponsive. ---
+      // This catches threads that are alive but stuck (haven't joined yet).
+      if (check_for_crashes()) {
+         cout << "\n[!] Engine unresponsive detected! Aborting match.\n";
+         cout << "Resume from where it left off by adding: --resume results_log.txt\n";
+         return;
+      }
+
+      // --- Pass 3: Dispatch new games to idle threads. ---
+      // An idle thread is one where m_thread_running==false AND the thread object 
+      // is no longer joinable (already joined in Pass 1). Enforces thread limits correctly.
+      for (uint i = 0; i < options.num_threads; i++)
+      {
+         if (!m_game_mgr[i].m_thread_running && !m_thread[i].joinable())
+         {
+            if (m_sprt_enabled && m_sprt_test_finished) break;
+            if (!new_game_can_start()) break;
+
+            string fen;
+            bool swap_sides;
+            uint pair_id;
+
+            if (!get_next_game(fen, swap_sides, pair_id))
+               continue;
+
             m_game_mgr[i].m_fen = fen;
             m_game_mgr[i].m_swap_sides = swap_sides;
-            
-            m_game_mgr[i].m_pair_id = m_total_games_started / 2;
-            
-            swap_sides = !swap_sides;
+            m_game_mgr[i].m_pair_id = pair_id;
 
             m_game_mgr[i].m_thread_running = true;
             m_thread[i] = thread(&GameManager::game_runner, &m_game_mgr[i]);
-            m_total_games_started++;
          }
       }
-      
-      // This loop waits for threads to finish and prints updates
-      bool all_threads_busy_or_match_done = !new_game_can_start() || (m_total_games_started >= options.num_games_to_play);
-      while (all_threads_busy_or_match_done && !match_completed())
+
+      print_results(true);
+
+      if (_kbhit())
       {
-         this_thread::sleep_for(500ms);
-         print_results();
-         save_pgn();
-         if (_kbhit())
-         {
-            cout << "\nKey pressed, terminating match.\n";
-            return;
-         }
-         for (uint i = 0; i < options.num_threads; i++)
-            if (m_game_mgr[i].m_engine_disconnected || m_game_mgr[i].is_engine_unresponsive() || (!options.continue_on_error && m_game_mgr[i].m_error))
-               return;
-        
-         // Re-check condition to break out of this waiting loop
-         all_threads_busy_or_match_done = !new_game_can_start() || (m_total_games_started >= options.num_games_to_play);
+         cout << "\nKey pressed, terminating match.\n";
+         return;
       }
-      // Brief sleep in the outer loop to avoid busy-waiting when threads are finishing
+
       this_thread::sleep_for(50ms);
    }
 }
 
 bool MatchManager::match_completed(void)
 {
-   if (m_sprt_enabled && m_sprt_test_finished)
-      return (num_games_in_progress() == 0);
-   return ((m_total_games_started >= options.num_games_to_play) && (num_games_in_progress() == 0));
+   if (m_sprt_enabled && m_sprt_test_finished) return (num_games_in_progress() == 0);
+
+   uint total_done = 0;
+   for (uint i = 0; i < m_pair_records.size(); i++) {
+      if (m_pair_records[i].g1 != UNFINISHED && m_pair_records[i].g1 != IN_PROGRESS) total_done++;
+      if (m_pair_records[i].g2 != UNFINISHED && m_pair_records[i].g2 != IN_PROGRESS) total_done++;
+   }
+   return (total_done >= options.num_games_to_play && num_games_in_progress() == 0);
 }
 
 bool MatchManager::new_game_can_start(void)
 {
    if (m_sprt_enabled && m_sprt_test_finished) return false;
-   return ((m_total_games_started < options.num_games_to_play) && (num_games_in_progress() < options.num_threads));
+
+   // Only check whether there is a pair slot waiting to be filled.
+   // The thread-count cap is enforced structurally by Pass 3 of main_loop,
+   // which only enters this function for threads that are already idle.
+   int num_pairs = options.num_games_to_play / 2;
+   for (int i = 0; i < num_pairs; i++) {
+      if (m_pair_records[i].g1 == UNFINISHED || m_pair_records[i].g2 == UNFINISHED)
+         return true;
+   }
+   return false;
 }
 
 uint MatchManager::num_games_in_progress(void)
@@ -211,6 +244,95 @@ uint MatchManager::num_games_in_progress(void)
       if (m_game_mgr[i].m_thread_running)
          games++;
    return games;
+}
+
+bool MatchManager::get_next_game(string &fen, bool &swap_sides, uint &pair_id)
+{
+   int num_pairs = options.num_games_to_play / 2;
+   for (int i = 0; i < num_pairs; i++) {
+      if (m_pair_records[i].g1 == UNFINISHED) {
+         m_pair_records[i].g1 = IN_PROGRESS; // in-memory sentinel; never written to disk
+         fen        = (i < (int)m_fens_list.size()) ? m_fens_list[i] : "";
+         swap_sides = false;
+         pair_id    = i;
+         return true;
+      }
+      if (m_pair_records[i].g2 == UNFINISHED) {
+         m_pair_records[i].g2 = IN_PROGRESS; // in-memory sentinel; never written to disk
+         fen        = (i < (int)m_fens_list.size()) ? m_fens_list[i] : "";
+         swap_sides = true;
+         pair_id    = i;
+         return true;
+      }
+   }
+   return false;
+}
+
+void MatchManager::update_stats_from_records(void)
+{
+   uint e1_wins = 0, e2_wins = 0, draws = 0;
+   uint illegal_moves = 0;
+   int penta[5] = {0};
+   int completed_pairs = 0;
+
+   for (uint pid = 0; pid < m_pair_records.size(); pid++) {
+
+      if (m_pair_records[pid].g1 == ERROR_ILLEGAL_MOVE) illegal_moves++;
+      if (m_pair_records[pid].g2 == ERROR_ILLEGAL_MOVE) illegal_moves++;
+
+      bool g1_done = (m_pair_records[pid].g1 == WHITE_WIN || m_pair_records[pid].g1 == BLACK_WIN || m_pair_records[pid].g1 == DRAW);
+      bool g2_done = (m_pair_records[pid].g2 == WHITE_WIN || m_pair_records[pid].g2 == BLACK_WIN || m_pair_records[pid].g2 == DRAW);
+
+      if (g1_done) {
+         // g1 is played with engine1=white, engine2=black (swap_sides=false)
+         if (m_pair_records[pid].g1 == WHITE_WIN) e1_wins++;
+         else if (m_pair_records[pid].g1 == BLACK_WIN) e2_wins++;
+         else draws++;
+      }
+      if (g2_done) {
+         // g2 is played with engine1=black, engine2=white (swap_sides=true)
+         if (m_pair_records[pid].g2 == BLACK_WIN) e1_wins++;
+         else if (m_pair_records[pid].g2 == WHITE_WIN) e2_wins++;
+         else draws++;
+      }
+
+      if (g1_done && g2_done) {
+         double e1_score = 0.0;
+         if (m_pair_records[pid].g1 == WHITE_WIN) e1_score += 1.0;
+         else if (m_pair_records[pid].g1 == DRAW)  e1_score += 0.5;
+
+         if (m_pair_records[pid].g2 == BLACK_WIN) e1_score += 1.0;
+         else if (m_pair_records[pid].g2 == DRAW)  e1_score += 0.5;
+
+         if      (e1_score == 0.0) penta[0]++;
+         else if (e1_score == 0.5) penta[1]++;
+         else if (e1_score == 1.0) penta[2]++;
+         else if (e1_score == 1.5) penta[3]++;
+         else if (e1_score == 2.0) penta[4]++;
+
+         completed_pairs++;
+      }
+   }
+
+   m_engine1_wins_total = e1_wins;
+   m_engine2_wins_total = e2_wins;
+   m_draws_total        = draws;
+   m_completed_pairs    = completed_pairs;
+   m_illegal_moves_total = illegal_moves;
+   for (int k = 0; k < 5; k++) m_penta[k] = penta[k];
+}
+
+bool MatchManager::check_for_crashes(void)
+{
+   for (uint i = 0; i < options.num_threads; i++) {
+      // Only check for alive but unresponsive/frozen threads.
+      // Disconnects and normal errors are handled directly in Pass 1.
+      if (m_game_mgr[i].is_engine_unresponsive())
+      {
+         return true;
+      }
+   }
+   return false;
 }
 
 int MatchManager::initialize(void)
@@ -223,66 +345,115 @@ int MatchManager::initialize(void)
 
    m_sprt_enabled = options.sprt_enabled;
    if (m_sprt_enabled) {
-       m_sprt_elo0 = options.sprt_elo0;
-       m_sprt_elo1 = options.sprt_elo1;
-       m_sprt_alpha = options.sprt_alpha;
-       m_sprt_beta = options.sprt_beta;
-       m_sprt_lower_bound = log(m_sprt_beta / (1.0 - m_sprt_alpha));
-       m_sprt_upper_bound = log((1.0 - m_sprt_beta) / m_sprt_alpha);
-       m_sprt_llr = 0.0;
-       m_sprt_test_finished = false;
-       cout << "SPRT test enabled with elo0=" << m_sprt_elo0 << ", elo1=" << m_sprt_elo1
-            << ", alpha=" << m_sprt_alpha << ", beta=" << m_sprt_beta << "\n";
-       cout << "SPRT bounds: [" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << "]\n";
+      m_sprt_elo0 = options.sprt_elo0;
+      m_sprt_elo1 = options.sprt_elo1;
+      m_sprt_alpha = options.sprt_alpha;
+      m_sprt_beta = options.sprt_beta;
+      m_sprt_lower_bound = log(m_sprt_beta / (1.0 - m_sprt_alpha));
+      m_sprt_upper_bound = log((1.0 - m_sprt_beta) / m_sprt_alpha);
+      m_sprt_llr = 0.0;
+      m_sprt_test_finished = false;
+      cout << "SPRT test enabled with elo0=" << m_sprt_elo0 << ", elo1=" << m_sprt_elo1
+           << ", alpha=" << m_sprt_alpha << ", beta=" << m_sprt_beta << "\n";
+      cout << "SPRT bounds: [" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << "]\n";
    }
 
    if (!options.fens_filename.empty())
    {
-      m_FENs_file.open(options.fens_filename, ios::in);
-      if (!m_FENs_file.is_open())
+      ifstream fens_file(options.fens_filename);
+      if (!fens_file.is_open())
       {
          cout << "Error: could not open FEN file " << options.fens_filename << "\n";
          return 0;
       }
-   }
-
-   if (!options.pgn_filename.empty() && !options.pgn4_filename.empty())
-   {
-      cout << "Error: must not choose both PGN and PGN4\n";
-      return 0;
-   }
-
-   if (!options.pgn_filename.empty() || !options.pgn4_filename.empty())
-   {
-      options.pgn4_format = options.pgn_filename.empty();
-      string filename = (options.pgn4_format) ? options.pgn4_filename : options.pgn_filename;
-      m_pgn_file.open(filename, ios::out);
-      if (!m_pgn_file.is_open())
-      {
-         cout << "Error: could not open PGN file " << filename << "\n";
-         return 0;
+      string line;
+      while (getline(fens_file, line)) {
+         if (!line.empty()) m_fens_list.push_back(line);
       }
-   }
-   else
-      options.pgn4_format = options.fourplayerchess;
-   
-   // Open results_log.txt in truncate mode to clear it on a new run.
-   m_results_log_file.open("results_log.txt", ios::out | ios::trunc);
-   if (!m_results_log_file.is_open())
-   {
-      cout << "Warning: could not open results_log.txt for writing.\n";
+      fens_file.close();
+
+      if (options.num_games_to_play > m_fens_list.size() * 2) {
+         options.num_games_to_play = (uint)(m_fens_list.size() * 2);
+         cout << "Adjusted total games to " << options.num_games_to_play << " to match the number of provided FENs.\n";
+      }
    }
 
    if (options.num_games_to_play % 2 != 0) {
-       options.num_games_to_play++;
-       cout << "Adjusted total games to " << options.num_games_to_play << " to ensure complete game pairs.\n";
+      options.num_games_to_play++;
+      cout << "Adjusted total games to " << options.num_games_to_play << " to ensure complete game pairs.\n";
    }
-   m_pair_results.resize(options.num_games_to_play / 2 + 1);
-   m_completed_pairs = 0;
-   for (int i = 0; i < 5; i++) m_penta[i] = 0;
+
+   int num_pairs = options.num_games_to_play / 2;
+   m_pair_records.resize(num_pairs);
+
+   // Load previous results if resuming
+   if (!options.resume_filename.empty()) {
+      ifstream res_file(options.resume_filename);
+      if (res_file.is_open()) {
+         string line;
+         int lines_loaded = 0;
+         int lines_skipped = 0;
+         while (getline(res_file, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            try {
+               stringstream ss(line);
+               string token;
+
+               if (!getline(ss, token, ',')) throw runtime_error("missing pair_id");
+               int pair_id = stoi(token);
+
+               if (!getline(ss, token, ',')) throw runtime_error("missing swap_sides");
+               int swap_sides = stoi(token);
+
+               if (!getline(ss, token, ',')) throw runtime_error("missing result");
+               int res_int = stoi(token);
+
+               // Only accept valid terminal states. IN_PROGRESS is never written to disk,
+               // so encountering it here means a corrupted file; skip it.
+               if (res_int < 0 || res_int >= IN_PROGRESS)
+                  throw runtime_error("result value out of range");
+
+               game_result res = (game_result)res_int;
+
+               if (pair_id >= 0 && pair_id < num_pairs) {
+                  if (swap_sides == 0) m_pair_records[pair_id].g1 = res;
+                  else                 m_pair_records[pair_id].g2 = res;
+                  lines_loaded++;
+               }
+            } catch (const exception &e) {
+               cout << "Warning: skipping malformed line in resume file (\"" << line << "\"): " << e.what() << "\n";
+               lines_skipped++;
+            }
+         }
+         res_file.close();
+         cout << "Resumed from " << options.resume_filename << ": loaded " << lines_loaded << " results";
+         if (lines_skipped > 0) cout << ", skipped " << lines_skipped << " bad lines";
+         cout << ".\n";
+      } else {
+         cout << "Warning: could not open resume file " << options.resume_filename << ".\n";
+      }
+   }
+
+   update_stats_from_records();
+
+   // Open log file: append when resuming, truncate on a fresh run.
+   if (!options.resume_filename.empty()) {
+      m_results_log_file.open(options.resume_filename, ios::out | ios::app);
+   } else {
+      // Warn the user if a log file from a previous run exists and --resume was not specified.
+      ifstream check_existing("results_log.txt");
+      if (check_existing.is_open()) {
+         check_existing.close();
+         cout << "Warning: results_log.txt already exists from a previous run. It will be overwritten.\n";
+         cout << "         To resume instead, add: --resume results_log.txt\n";
+      }
+      m_results_log_file.open("results_log.txt", ios::out | ios::trunc);
+      if (!m_results_log_file.is_open())
+         cout << "Warning: could not open results_log.txt for writing.\n";
+   }
 
    m_game_mgr = new GameManager[options.num_threads];
-   m_thread = new thread[options.num_threads];
+   m_thread    = new thread[options.num_threads];
 
    return 1;
 }
@@ -320,7 +491,6 @@ void MatchManager::shut_down_all_engines(void)
 
    cout << "shutting down engines...\n";
 
-   // poll for all engines shut down, for up to 500 ms.
    int num_engines_running;
    for (int x = 0; x < 10; x++)
    {
@@ -386,174 +556,135 @@ void MatchManager::send_engine_custom_commands(Engine *engine)
    }
 }
 
-void MatchManager::print_results(void)
+void MatchManager::print_results(bool clear_screen)
 {
-   uint engine1_wins, engine2_wins, draws, illegal_move_games, engine1_losses_on_time, engine2_losses_on_time;
-   engine1_wins = engine2_wins = draws = illegal_move_games = engine1_losses_on_time = engine2_losses_on_time = 0;
+   uint engine1_wins = m_engine1_wins_total;
+   uint engine2_wins = m_engine2_wins_total;
+   uint draws = m_draws_total;
+   uint illegal_move_games = m_illegal_moves_total;
+   uint engine1_losses_on_time = 0;
+   uint engine2_losses_on_time = 0;
 
    for (uint i = 0; i < options.num_threads; i++)
    {
-      engine1_wins += m_game_mgr[i].m_engine1_wins;
-      engine2_wins += m_game_mgr[i].m_engine2_wins;
-      draws += m_game_mgr[i].m_draws;
-      illegal_move_games += m_game_mgr[i].m_illegal_move_games;
       engine1_losses_on_time += m_game_mgr[i].m_engine1_losses_on_time;
       engine2_losses_on_time += m_game_mgr[i].m_engine2_losses_on_time;
    }
-   
+
    int N_games = engine1_wins + engine2_wins + draws;
    int N_pairs = m_completed_pairs;
 
-   static int last_total_games_completed = -1;
-   int total_games_completed = m_total_games_started - num_games_in_progress();
-   if (total_games_completed == last_total_games_completed && N_games > 0)
+   // Track total events (completed games + errors) to detect when a redraw is needed.
+   int current_events = N_games + (int)illegal_move_games;
+   static int last_events = -1;
+   if (clear_screen && current_events == last_events)
       return;
-   last_total_games_completed = total_games_completed;
+   last_events = current_events;
 
    stringstream ss_output;
    ss_output << "Engine1: " << options.engine_file_name_1 << " vs Engine2: " << options.engine_file_name_2 << "\n\n";
 
    if (N_pairs == 0) {
-       ss_output << "No game pairs completed yet." << endl;
+      ss_output << "No game pairs completed yet." << endl;
    } else {
-       double sum_P = 0.0;
-       double sum_P2 = 0.0;
-       for (int k = 0; k < 5; ++k) {
-           double P = k * 0.5; // Pair score outcomes: 0.0, 0.5, 1.0, 1.5, 2.0
-           double count = m_penta[k];
-           sum_P += count * P;
-           sum_P2 += count * P * P;
-       }
-       double mean_P = sum_P / N_pairs;
-       double var_P = (sum_P2 / N_pairs) - (mean_P * mean_P);
-       double score = mean_P / 2.0;
-   
-       ss_output << fixed << setprecision(2);
-   
-       // Elo
-       if (score <= 1e-9 || score >= 1.0 - 1e-9) {
-           ss_output << "Elo   | " << (score > 0.5 ? "+inf" : "-inf") << endl;
-       } else {
-           double var_per_game = var_P / 4.0;
-           double std_error_of_mean_score = sqrt(var_per_game / N_pairs);
-           double elo_per_score = 400.0 / (score * (1.0 - score) * log(10.0));
-           double std_error_of_elo = elo_per_score * std_error_of_mean_score;
-           double elo_margin = 1.96 * std_error_of_elo;
-           double elo_diff = -400.0 * log10(1.0 / score - 1.0);
-           ss_output << "Elo   | " << elo_diff << " +- " << elo_margin << " (95%)" << endl;
-       }
-   
-       // SPRT
-       if (m_sprt_enabled) {
-          stringstream tc_ss;
-          if (options.tc_fixed_time_move_ms > 0) {
-              tc_ss << fixed << setprecision(2) << (float)options.tc_fixed_time_move_ms / 1000.0 << "s";
-          } else {
-              tc_ss << options.tc_ms / 1000 << "+" << fixed << setprecision(2) << (float)options.tc_inc_ms / 1000.0;
-          }
-          string tc_str = tc_ss.str();
-      
-          ss_output << "SPRT  | " << options.sprt_elo1 << " " << tc_str << " Threads=" << options.num_threads << " Hash=" << options.mem_size_1 << "MB" << endl;
+      double sum_P = 0.0;
+      double sum_P2 = 0.0;
+      for (int k = 0; k < 5; ++k) {
+         double P     = k * 0.5;
+         double count = m_penta[k];
+         sum_P  += count * P;
+         sum_P2 += count * P * P;
+      }
+      double mean_P = sum_P / N_pairs;
+      double var_P  = (sum_P2 / N_pairs) - (mean_P * mean_P);
+      double score  = mean_P / 2.0;
 
-          // LLR calculation using Brownian Motion approximation (Cutechess standard)
-          double E0 = elo_to_score(m_sprt_elo0);
-          double E1 = elo_to_score(m_sprt_elo1);
-          if (var_P > 1e-9) {
-              m_sprt_llr = (4.0 * N_pairs / var_P) * (E1 - E0) * (score - (E0 + E1) / 2.0);
-          } else {
-              m_sprt_llr = 0.0;
-          }
+      ss_output << fixed << setprecision(2);
 
-          ss_output << "LLR   | " << m_sprt_llr << " (" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << ") [" 
-               << m_sprt_elo0 << ", " << m_sprt_elo1 << "]" << endl;
+      // Elo
+      if (score <= 1e-9 || score >= 1.0 - 1e-9) {
+         ss_output << "Elo   | " << (score > 0.5 ? "+inf" : "-inf") << endl;
+      } else {
+         double var_per_game            = var_P / 4.0;
+         double std_error_of_mean_score = sqrt(var_per_game / N_pairs);
+         double elo_per_score           = 400.0 / (score * (1.0 - score) * log(10.0));
+         double std_error_of_elo        = elo_per_score * std_error_of_mean_score;
+         double elo_margin              = 1.96 * std_error_of_elo;
+         double elo_diff                = -400.0 * log10(1.0 / score - 1.0);
+         ss_output << "Elo   | " << elo_diff << " +- " << elo_margin << " (95%)" << endl;
+      }
 
-          if (!m_sprt_test_finished && m_sprt_llr > m_sprt_upper_bound) m_sprt_test_finished = true;
-          else if (!m_sprt_test_finished && m_sprt_llr < m_sprt_lower_bound) m_sprt_test_finished = true;
-       }
-   
-       // Games & Penta array
-       ss_output << "Games | N: " << N_games << " W: " << engine1_wins << " L: " << engine2_wins << " D: " << draws << endl;
-       ss_output << "Penta | " << m_penta[0] << " " << m_penta[1] << " " << m_penta[2] << " " << m_penta[3] << " " << m_penta[4] << endl;
-   
-       // Other info
-       stringstream ss;
-       if (illegal_move_games != 0)
-          ss << "  [Illegal Moves: " << illegal_move_games << "]";
-       if ((engine1_losses_on_time != 0) || (engine2_losses_on_time != 0))
-          ss << "  [Timeouts: " << engine1_losses_on_time << " / " << engine2_losses_on_time <<  "]";
-       if (ss.str().length() > 0)
-          ss_output << "Info  |" << ss.str() << endl;
+      // SPRT
+      if (m_sprt_enabled) {
+         stringstream tc_ss;
+         if (options.tc_fixed_time_move_ms > 0) {
+            tc_ss << fixed << setprecision(2) << (float)options.tc_fixed_time_move_ms / 1000.0 << "s";
+         } else {
+            tc_ss << options.tc_ms / 1000 << "+" << fixed << setprecision(2) << (float)options.tc_inc_ms / 1000.0;
+         }
+         ss_output << "SPRT  | " << options.sprt_elo1 << " " << tc_ss.str()
+                   << " Threads=" << options.num_threads << " Hash=" << options.mem_size_1 << "MB" << endl;
 
-       if (m_sprt_enabled && m_sprt_test_finished) {
-            ss_output << "\nSPRT test finished: ";
-            if(m_sprt_llr >= m_sprt_upper_bound)
-                ss_output << "H1 accepted (engine 1 is stronger)." << endl;
-            else
-                ss_output << "H0 accepted (elo is within bounds)." << endl;
-       }
+         double E0 = elo_to_score(m_sprt_elo0);
+         double E1 = elo_to_score(m_sprt_elo1);
+         if (var_P > 1e-9) {
+            m_sprt_llr = (4.0 * N_pairs / var_P) * (E1 - E0) * (score - (E0 + E1) / 2.0);
+         } else {
+            m_sprt_llr = 0.0;
+         }
+
+         ss_output << "LLR   | " << m_sprt_llr << " (" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << ") ["
+                   << m_sprt_elo0 << ", " << m_sprt_elo1 << "]" << endl;
+
+         if (!m_sprt_test_finished && m_sprt_llr > m_sprt_upper_bound) m_sprt_test_finished = true;
+         else if (!m_sprt_test_finished && m_sprt_llr < m_sprt_lower_bound) m_sprt_test_finished = true;
+      }
+
+      // Games & Penta
+      ss_output << "Games | N: " << N_games << " W: " << engine1_wins << " L: " << engine2_wins << " D: " << draws << endl;
+      ss_output << "Penta | " << m_penta[0] << " " << m_penta[1] << " " << m_penta[2] << " " << m_penta[3] << " " << m_penta[4] << endl;
+
+      stringstream ss;
+      if (illegal_move_games != 0)
+         ss << "  [Illegal Moves: " << illegal_move_games << "]";
+      if ((engine1_losses_on_time != 0) || (engine2_losses_on_time != 0))
+         ss << "  [Timeouts: " << engine1_losses_on_time << " / " << engine2_losses_on_time << "]";
+      if (ss.str().length() > 0)
+         ss_output << "Info  |" << ss.str() << endl;
+
+      if (m_sprt_enabled && m_sprt_test_finished) {
+         ss_output << "\nSPRT test finished: ";
+         if (m_sprt_llr >= m_sprt_upper_bound)
+            ss_output << "H1 accepted (engine 1 is stronger)." << endl;
+         else
+            ss_output << "H0 accepted (elo is within bounds)." << endl;
+      }
    }
-   
+
    string output_str = ss_output.str();
 
-   // --- Write to results.txt (overwrite) ---
+   // Write current summary to results.txt (always overwrite)
    ofstream results_file("results.txt", ios::out | ios::trunc);
    if (results_file.is_open())
    {
       results_file << output_str;
       results_file.close();
    }
-   
-   // --- Append to results_log.txt ---
-   if (m_results_log_file.is_open())
-   {
-       static bool first_log_entry = true;
-       if (!first_log_entry) {
-           m_results_log_file << "\n-------------------------------------------------\n\n";
-       }
-       m_results_log_file << output_str;
-       m_results_log_file.flush();
-       first_log_entry = false;
-   }
 
-   // --- Clear screen and print to console ---
-   #ifdef WIN32
-     system("cls");
-   #else
-     cout << "\033[2J\033[1;1H";
-   #endif
+   if (clear_screen)
+   {
+      #ifdef WIN32
+        system("cls");
+      #else
+        cout << "\033[2J\033[1;1H";
+      #endif
+   }
+   else
+   {
+      cout << "\n";
+   }
 
    cout << output_str;
-}
-
-int MatchManager::get_next_fen(string &fen)
-{
-   if (!m_FENs_file.is_open())
-   {
-      fen = "";
-      return 1;
-   }
-   getline(m_FENs_file, fen);
-   if (m_FENs_file.eof() && fen.empty())
-   {
-      cout << "Used all FENs.\n";
-      return 0;
-   }
-   return 1;
-}
-
-void MatchManager::save_pgn(void)
-{
-   if (!m_pgn_file.is_open())
-      return;
-
-   for (uint i = 0; i < options.num_threads; i++)
-   {
-      if (m_game_mgr[i].m_pgn_valid.load(memory_order_acquire))
-      {
-         m_game_mgr[i].m_pgn_valid = false;
-         m_pgn_file << m_game_mgr[i].m_pgn;
-      }
-   }
 }
 
 int parse_cmd_line_options(int argc, char* argv[])
@@ -562,7 +693,7 @@ int parse_cmd_line_options(int argc, char* argv[])
    {
       po::options_description desc("Command line options");
       desc.add_options()
-         ("help",      "print help message")
+         ("help",       "print help message")
          ("e1",         po::value<string>(&options.engine_file_name_1), "first engine's file name")
          ("e2",         po::value<string>(&options.engine_file_name_2), "second engine's file name")
          ("x1",         "first engine uses xboard protocol. (UCI is the default protocol.)")
@@ -591,14 +722,13 @@ int parse_cmd_line_options(int argc, char* argv[])
          ("4pc",        "enable 4 player chess (teams) mode")
          ("continue",   "continue match if error occurs (e.g. illegal move)")
          ("pmoves",     "print out all moves")
-         ("pgn",        po::value<string>(&options.pgn_filename), "save games in PGN format to specified file name\n(if file exists it will be overwritten)")
-         ("pgn4",       po::value<string>(&options.pgn4_filename), "save games in PGN4 format to specified file name\n(if file exists it will be overwritten)")
          // SPRT options
-         ("sprt", "Enable SPRT test. Test stops when bounds are reached.")
-         ("sprt-elo0", po::value<double>(&options.sprt_elo0)->default_value(0.0), "SPRT H0 (null hypothesis) Elo.")
-         ("sprt-elo1", po::value<double>(&options.sprt_elo1)->default_value(5.0), "SPRT H1 (alternative hypothesis) Elo.")
+         ("sprt",       "Enable SPRT test. Test stops when bounds are reached.")
+         ("sprt-elo0",  po::value<double>(&options.sprt_elo0)->default_value(0.0), "SPRT H0 (null hypothesis) Elo.")
+         ("sprt-elo1",  po::value<double>(&options.sprt_elo1)->default_value(5.0), "SPRT H1 (alternative hypothesis) Elo.")
          ("sprt-alpha", po::value<double>(&options.sprt_alpha)->default_value(0.05), "SPRT alpha (type I error).")
-         ("sprt-beta", po::value<double>(&options.sprt_beta)->default_value(0.05), "SPRT beta (type II error).")
+         ("sprt-beta",  po::value<double>(&options.sprt_beta)->default_value(0.05), "SPRT beta (type II error).")
+         ("resume",     po::value<string>(&options.resume_filename), "resume match from the specified log file (e.g., results_log.txt)")
          ;
 
       po::variables_map var_map;
@@ -611,16 +741,16 @@ int parse_cmd_line_options(int argc, char* argv[])
          return 0;
       }
 
-      options.uci_1 = (var_map.count("x1") == 0);
-      options.uci_2 = (var_map.count("x2") == 0);
-      options.debug_1 = (var_map.count("debug1") != 0);
-      options.debug_2 = (var_map.count("debug2") != 0);
+      options.uci_1             = (var_map.count("x1") == 0);
+      options.uci_2             = (var_map.count("x2") == 0);
+      options.debug_1           = (var_map.count("debug1") != 0);
+      options.debug_2           = (var_map.count("debug2") != 0);
       options.continue_on_error = (var_map.count("continue") != 0);
-      options.print_moves = (var_map.count("pmoves") != 0);
-      options.fourplayerchess = (var_map.count("4pc") != 0);
-      options.early_win = (var_map.count("earlywin") != 0);
-      options.early_draw = (var_map.count("earlydraw") != 0);
-      options.sprt_enabled = (var_map.count("sprt") != 0);
+      options.print_moves       = (var_map.count("pmoves") != 0);
+      options.fourplayerchess   = (var_map.count("4pc") != 0);
+      options.early_win         = (var_map.count("earlywin") != 0);
+      options.early_draw        = (var_map.count("earlydraw") != 0);
+      options.sprt_enabled      = (var_map.count("sprt") != 0);
    }
    catch (exception &e)
    {

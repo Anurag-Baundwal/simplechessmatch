@@ -36,7 +36,7 @@ void GameManager::game_runner(void)
 {
    game_result result;
 
-   m_timestamp = chrono::steady_clock::now();
+   m_timestamp_ns = chrono::steady_clock::now().time_since_epoch().count();   
    m_loss_on_time = false;
    m_repetition_draw = false;
    m_thread_running = true;
@@ -44,43 +44,51 @@ void GameManager::game_runner(void)
    m_drawish_count = 0;
    m_move_list = "";
    m_move_vector.clear();
+   // Reset error flags at the start of every game so old errors don't carry over
+   m_error = false;
+   m_engine_disconnected = false;
 
    result = run_engine_game(chrono::milliseconds(options.tc_ms), chrono::milliseconds(options.tc_inc_ms),
                             chrono::milliseconds(options.tc_fixed_time_move_ms));
 
-   if (m_num_moves > 0)
-      store_pgn(result, m_swap_sides ? m_engine2.m_file_name : m_engine1.m_file_name, m_swap_sides ? m_engine1.m_file_name : m_engine2.m_file_name,
-                chrono::milliseconds(options.tc_ms), chrono::milliseconds(options.tc_inc_ms), chrono::milliseconds(options.tc_fixed_time_move_ms));
+   // Only update stats if the game completed successfully.
+   if (result != ERROR_ENGINE_DISCONNECTED && result != ERROR_ILLEGAL_MOVE && result != UNDETERMINED && result != ERROR_INVALID_POSITION)
+   {
+      if (((result == WHITE_WIN) && !m_swap_sides) || ((result == BLACK_WIN) && m_swap_sides))
+      {
+         m_engine1_wins++;
+         if (m_loss_on_time)
+            m_engine2_losses_on_time++;
+      }
+      else if (((result == BLACK_WIN) && !m_swap_sides) || ((result == WHITE_WIN) && m_swap_sides))
+      {
+         m_engine2_wins++;
+         if (m_loss_on_time)
+            m_engine1_losses_on_time++;
+      }
+      else if (result == DRAW)
+      {
+         m_draws++;
+      }
 
-   if (result == ERROR_ENGINE_DISCONNECTED)
-      m_engine_disconnected = true;
-   else if (result == ERROR_ILLEGAL_MOVE)
-      m_illegal_move_games++;
-   else if (((result == WHITE_WIN) && !m_swap_sides) || ((result == BLACK_WIN) && m_swap_sides))
-   {
-      m_engine1_wins++;
-      if (m_loss_on_time)
-         m_engine2_losses_on_time++;
+      m_is_valid_game = true;
    }
-   else if (((result == BLACK_WIN) && !m_swap_sides) || ((result == WHITE_WIN) && m_swap_sides))
+   else
    {
-      m_engine2_wins++;
-      if (m_loss_on_time)
-         m_engine1_losses_on_time++;
-   }
-   else if (result == DRAW)
-      m_draws++;
+      if (result == ERROR_ENGINE_DISCONNECTED)
+         m_engine_disconnected = true;
+      else if (result == ERROR_ILLEGAL_MOVE)
+         m_illegal_move_games++;
 
-   if ((result == ERROR_ILLEGAL_MOVE) || (result == ERROR_INVALID_POSITION) || (result == UNDETERMINED))
-   {
-      cout << "\n" << m_fen << "\n" << m_move_list << "\n";
-      if (m_num_moves > 0)
-         cout << "\n" << m_pgn << "\n";
+      m_error = true;
+      m_is_valid_game = false;
+
+      cout << "\n[!] Game Error (Pair ID: " << m_pair_id << ", result code: " << (int)result << ")\n";
+      cout << "FEN: " << m_fen << "\n";
+      cout << "Moves played before crash: " << m_move_list << "\n";
    }
-   
+
    m_final_result = result;
-   m_is_valid_game = ((result == WHITE_WIN) || (result == BLACK_WIN) || (result == DRAW));
-   
    m_thread_running = false;
 }
 
@@ -137,7 +145,7 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
    else
       black_engine->engine_new_game_start(start_time_ms.count(), increment_ms.count(), fixed_time_ms.count());
 
-   m_timestamp = chrono::steady_clock::now();
+   m_timestamp_ns = chrono::steady_clock::now().time_since_epoch().count();
 
    while ((white_engine->get_game_result() == UNFINISHED) && (black_engine->get_game_result() == UNFINISHED) && (m_num_moves < options.max_moves))
    {
@@ -158,7 +166,10 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          }
          if (white_engine->m_move.empty())
             break; // no legal moves
-         elapsed_time_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - m_timestamp);
+         {
+            auto snapshot = chrono::time_point<chrono::steady_clock>(chrono::nanoseconds(m_timestamp_ns.load()));
+            elapsed_time_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - snapshot);
+         }
          m_white_clock_ms = m_white_clock_ms - elapsed_time_ms;
          if (m_white_clock_ms.count() < (0 - (int)options.margin_ms))
          {
@@ -171,7 +182,7 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
 
          move_played(white_engine->m_move);
          black_engine->send_move_and_clocks_to_engine(white_engine->m_move, m_fen, m_move_list, m_black_clock_ms.count(), m_white_clock_ms.count(), increment_ms.count(), fixed_time_ms.count());
-         m_timestamp = chrono::steady_clock::now();
+         m_timestamp_ns = chrono::steady_clock::now().time_since_epoch().count();
          if (options.print_moves)
             cout << "white moved: " << white_engine->m_move << ",   elapsed: " << elapsed_time_ms.count() << " ms,   white clock: "
                  << m_white_clock_ms.count() << " ms,  eval: " << white_engine->get_eval() << "\n";
@@ -186,7 +197,10 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          }
          if (black_engine->m_move.empty())
             break; // no legal moves
-         elapsed_time_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - m_timestamp);
+         {
+            auto snapshot = chrono::time_point<chrono::steady_clock>(chrono::nanoseconds(m_timestamp_ns.load()));
+            elapsed_time_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - snapshot);
+         }
          m_black_clock_ms = m_black_clock_ms - elapsed_time_ms;
          if (m_black_clock_ms.count() < (0 - (int)options.margin_ms))
          {
@@ -199,7 +213,7 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
 
          move_played(black_engine->m_move);
          white_engine->send_move_and_clocks_to_engine(black_engine->m_move, m_fen, m_move_list, m_white_clock_ms.count(), m_black_clock_ms.count(), increment_ms.count(), fixed_time_ms.count());
-         m_timestamp = chrono::steady_clock::now();
+         m_timestamp_ns = chrono::steady_clock::now().time_since_epoch().count();
          if (options.print_moves)
             cout << "black moved: " << black_engine->m_move << ",   elapsed: " << elapsed_time_ms.count() << " ms,   black clock: "
                  << m_black_clock_ms.count() << " ms,  eval: " << black_engine->get_eval() << "\n";
@@ -229,8 +243,9 @@ bool GameManager::is_engine_unresponsive(void)
 {
    if (m_thread_running)
    {
+      auto snapshot = chrono::time_point<chrono::steady_clock>(chrono::nanoseconds(m_timestamp_ns.load()));
       chrono::milliseconds elapsed_time_ms;
-      elapsed_time_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - m_timestamp);
+      elapsed_time_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - snapshot);
       chrono::milliseconds clock_ms = (m_turn == WHITE) ? m_white_clock_ms : m_black_clock_ms;
 
       if ((elapsed_time_ms > 5s) && (!m_engine1.m_is_ready || !m_engine2.m_is_ready))
@@ -275,7 +290,7 @@ game_result GameManager::determine_game_result(Engine *white_engine, Engine *bla
    }
    else if ((white_result == DRAW) || (black_result == DRAW))
    {
-      // Have DRAW claim takes precedence over other claims.
+      // DRAW claim takes precedence over other claims.
       // Otherwise, there can be a results mismatch when 50-move draw is claimed but checkmate would have been possible on 51st move.
       result = DRAW;
    }
@@ -329,7 +344,7 @@ game_result GameManager::determine_game_result(Engine *white_engine, Engine *bla
 void GameManager::store_pgn(game_result result, const string &white_name, const string &black_name,
                             chrono::milliseconds start_time_ms, chrono::milliseconds increment_ms, chrono::milliseconds fixed_time_ms)
 {
-   if (options.pgn4_format)
+   if (options.fourplayerchess)
    {
       store_pgn4(result, white_name, black_name, start_time_ms, increment_ms, fixed_time_ms);
       return;
@@ -339,8 +354,6 @@ void GameManager::store_pgn(game_result result, const string &white_name, const 
    string result_str;
    int black_first = 0;
 
-   if (!options.variant.empty())
-      temp_pgn << "[Variant \"" << options.variant << "\"]\n";
    int64_t base_time_seconds = fixed_time_ms.count() ? 0 : (start_time_ms.count() / 1000);
    int64_t inc_time_seconds = fixed_time_ms.count() ? (fixed_time_ms.count() / 1000) : (increment_ms.count() / 1000);
    temp_pgn << "[TimeControl \"" << base_time_seconds << "+" << inc_time_seconds << "\"]\n";
@@ -368,7 +381,7 @@ void GameManager::store_pgn(game_result result, const string &white_name, const 
          temp_pgn << "\n1... ";
       }
    }
-   for (int i = 0; i < m_move_vector.size(); i++)
+   for (int i = 0; i < (int)m_move_vector.size(); i++)
    {
       int j = i + black_first;
       if ((j % 10) == 0)
@@ -378,19 +391,6 @@ void GameManager::store_pgn(game_result result, const string &white_name, const 
       else
          temp_pgn << " " << m_move_vector[i];
    }
-
-   if ((result == DRAW) && m_repetition_draw)
-      result_str = "{Draw by repetition} 1/2-1/2";
-   else if ((result == DRAW) && m_engine1.m_offered_draw && m_engine2.m_offered_draw)
-      result_str = "{Draw by agreement} 1/2-1/2";
-   else if ((result == DRAW) && (m_num_moves >= options.max_moves))
-      result_str = "{Draw due to max moves reached} 1/2-1/2";
-   else if ((result == DRAW) && options.early_draw && (m_drawish_count >= options.draw_moves))
-      result_str = "{Draw adjudicated} 1/2-1/2";
-   else if ((m_loss_on_time) && (result == WHITE_WIN))
-      result_str = "{White wins on time} 1-0";
-   else if ((m_loss_on_time) && (result == BLACK_WIN))
-      result_str = "{Black wins on time} 0-1";
 
    temp_pgn << " " << result_str << "\n\n";
 
@@ -407,11 +407,11 @@ void GameManager::store_pgn4(game_result result, const string &white_name, const
    if ((result == WHITE_WIN) || (result == BLACK_WIN))
    {
       if (m_engine1.m_resigned || m_engine2.m_resigned)
-         m_move_vector.push_back("R"); // resignation
+         m_move_vector.push_back("R");
       else if (m_loss_on_time)
-         m_move_vector.push_back("T"); // loss on time
+         m_move_vector.push_back("T");
       else
-         m_move_vector.push_back("#"); // checkmate
+         m_move_vector.push_back("#");
    }
    else if (result == DRAW)
    {
@@ -419,9 +419,9 @@ void GameManager::store_pgn4(game_result result, const string &white_name, const
           (m_engine1.m_offered_draw && m_engine2.m_offered_draw) ||
           (m_num_moves >= options.max_moves) ||
           (options.early_draw && (m_drawish_count >= options.draw_moves)))
-         m_move_vector.push_back("D"); // Draw by repetition, or draw by agreement, or draw adjudicated
+         m_move_vector.push_back("D");
       else
-         m_move_vector.push_back("S"); // Stalemate or other draw
+         m_move_vector.push_back("S");
    }
 
    temp_pgn << "[Variant \"Teams\"]\n";
@@ -437,17 +437,7 @@ void GameManager::store_pgn4(game_result result, const string &white_name, const
    else if (result == BLACK_WIN)
       temp_pgn << "[Result \"0-1\"]\n";
    else if (result == DRAW)
-   {
       temp_pgn << "[Result \"1/2-1/2\"]\n";
-      if (m_repetition_draw)
-         temp_pgn << "[Termination \"Draw by repetition\"]\n";
-      else if (m_engine1.m_offered_draw && m_engine2.m_offered_draw)
-         temp_pgn << "[Termination \"Draw by agreement\"]\n";
-      else if (m_num_moves >= options.max_moves)
-         temp_pgn << "[Termination \"Draw due to max moves reached\"]\n";
-      else if (options.early_draw && (m_drawish_count >= options.draw_moves))
-         temp_pgn << "[Termination \"Draw adjudicated\"]\n";
-   }
    else
       temp_pgn << "[Result \"*\"]\n";
 
@@ -463,7 +453,7 @@ void GameManager::store_pgn4(game_result result, const string &white_name, const
       else if (m_fen.rfind("G-", 0) == 0)
          first_player = 3;
    }
-   for (int i = 0; i < m_move_vector.size(); i++)
+   for (int i = 0; i < (int)m_move_vector.size(); i++)
    {
       int j = i + first_player;
       convert_move_to_PGN4_format(m_move_vector[i]);
