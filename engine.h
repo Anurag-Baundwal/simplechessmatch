@@ -135,6 +135,8 @@ struct options_info
    uint tc_ms;
    uint tc_inc_ms;
    uint tc_fixed_time_move_ms;
+   uint tc_depth;
+   uint64_t tc_nodes;
    uint margin_ms;
    uint num_games_to_play;
    uint num_threads;

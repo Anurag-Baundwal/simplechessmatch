@@ -154,12 +154,15 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
             break; // no legal moves
          elapsed_time_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - m_timestamp);
          m_white_clock_ms = m_white_clock_ms - elapsed_time_ms;
-         if (m_white_clock_ms.count() < (0 - (int)options.margin_ms))
+         if (options.tc_depth == 0 && options.tc_nodes == 0)
          {
-            cout << white_engine->m_name << " (white) ran out of time. " << m_white_clock_ms.count() << " ms\n";
-            m_loss_on_time = true;
-            result = BLACK_WIN;
-            break;
+            if (m_white_clock_ms.count() < (0 - (int)options.margin_ms))
+            {
+               cout << white_engine->m_name << " (white) ran out of time. " << m_white_clock_ms.count() << " ms\n";
+               m_loss_on_time = true;
+               result = BLACK_WIN;
+               break;
+            }
          }
          m_white_clock_ms = (fixed_time_ms.count() ? (fixed_time_ms) : (m_white_clock_ms + increment_ms));
 
@@ -182,12 +185,15 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
             break; // no legal moves
          elapsed_time_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - m_timestamp);
          m_black_clock_ms = m_black_clock_ms - elapsed_time_ms;
-         if (m_black_clock_ms.count() < (0 - (int)options.margin_ms))
+         if (options.tc_depth == 0 && options.tc_nodes == 0)
          {
-            cout << black_engine->m_name << " (black) ran out of time. " << m_black_clock_ms.count() << " ms\n";
-            m_loss_on_time = true;
-            result = WHITE_WIN;
-            break;
+            if (m_black_clock_ms.count() < (0 - (int)options.margin_ms))
+            {
+               cout << black_engine->m_name << " (black) ran out of time. " << m_black_clock_ms.count() << " ms\n";
+               m_loss_on_time = true;
+               result = WHITE_WIN;
+               break;
+            }
          }
          m_black_clock_ms = (fixed_time_ms.count() ? (fixed_time_ms) : (m_black_clock_ms + increment_ms));
 
@@ -238,6 +244,9 @@ bool GameManager::is_engine_unresponsive(void)
 
       if ((clock_ms - elapsed_time_ms) < -10s)
       {
+         if (options.tc_depth > 0 || options.tc_nodes > 0)
+            return false;
+
          if (((m_turn == WHITE) && !m_swap_sides) || ((m_turn == BLACK) && m_swap_sides))
             cout << "Error: " << m_engine1.m_name << " (" << m_engine1.m_ID << ") is not moving (clock < -10s).\n";
          else
@@ -337,7 +346,12 @@ void GameManager::store_pgn(game_result result, const string &white_name, const 
       temp_pgn << "[Variant \"" << options.variant << "\"]\n";
    int64_t base_time_seconds = fixed_time_ms.count() ? 0 : (start_time_ms.count() / 1000);
    int64_t inc_time_seconds = fixed_time_ms.count() ? (fixed_time_ms.count() / 1000) : (increment_ms.count() / 1000);
-   temp_pgn << "[TimeControl \"" << base_time_seconds << "+" << inc_time_seconds << "\"]\n";
+   if (options.tc_depth > 0)
+      temp_pgn << "[TimeControl \"-\"]\n[DepthLimit \"" << options.tc_depth << "\"]\n";
+   else if (options.tc_nodes > 0)
+      temp_pgn << "[TimeControl \"-\"]\n[NodesLimit \"" << options.tc_nodes << "\"]\n";
+   else
+      temp_pgn << "[TimeControl \"" << base_time_seconds << "+" << inc_time_seconds << "\"]\n";
    temp_pgn << "[White \"" << white_name << "\"]\n";
    temp_pgn << "[Black \"" << black_name << "\"]\n";
 
@@ -422,7 +436,12 @@ void GameManager::store_pgn4(game_result result, const string &white_name, const
    temp_pgn << "[RuleVariants \"EnPassant\"]\n";
    int64_t base_time_minutes = fixed_time_ms.count() ? 0 : (start_time_ms.count() / 60000);
    int64_t inc_time_seconds = fixed_time_ms.count() ? (fixed_time_ms.count() / 1000) : (increment_ms.count() / 1000);
-   temp_pgn << "[TimeControl \"" << base_time_minutes << "+" << inc_time_seconds << "\"]\n";
+   if (options.tc_depth > 0)
+      temp_pgn << "[TimeControl \"-\"]\n[DepthLimit \"" << options.tc_depth << "\"]\n";
+   else if (options.tc_nodes > 0)
+      temp_pgn << "[TimeControl \"-\"]\n[NodesLimit \"" << options.tc_nodes << "\"]\n";
+   else
+      temp_pgn << "[TimeControl \"" << base_time_minutes << "+" << inc_time_seconds << "\"]\n";
    temp_pgn << "[Red \"" << white_name << "\"]\n";
    temp_pgn << "[Blue \"" << black_name << "\"]\n";
 

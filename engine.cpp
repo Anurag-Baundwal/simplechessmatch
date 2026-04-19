@@ -244,7 +244,17 @@ int Engine::engine_new_game_setup(player_color color, player_color turn, int64_t
 
       send_engine_cmd("easy");
       send_engine_cmd("post");
-      if (fixed_time_ms)
+
+      if (options.tc_depth > 0)
+      {
+         send_engine_cmd("sd " + to_string(options.tc_depth)); // standard xboard depth command
+      }
+      else if (options.tc_nodes > 0)
+      {
+         // Nodes limit isn't standard in the original xboard protocol
+         // Left intentionally blank; will be properly handled in UCI mode
+      }
+      else if (fixed_time_ms)
       {
          if ((fixed_time_ms % 1000) == 0)
             send_engine_cmd("st " + to_string((fixed_time_ms) / 1000));
@@ -290,7 +300,11 @@ void Engine::engine_new_game_start(int64_t start_time_ms, int64_t inc_time_ms, i
 {
    if (m_uci)
    {
-      if (fixed_time_ms != 0)
+      if (options.tc_depth > 0)
+         send_engine_cmd("go depth " + to_string(options.tc_depth));
+      else if (options.tc_nodes > 0)
+         send_engine_cmd("go nodes " + to_string(options.tc_nodes));
+      else if (fixed_time_ms != 0)
          send_engine_cmd("go movetime " + to_string(fixed_time_ms));
       else
          send_engine_cmd("go wtime " + to_string(start_time_ms) + " btime " + to_string(start_time_ms) + " winc " + to_string(inc_time_ms) + " binc " + to_string(inc_time_ms));
@@ -462,7 +476,11 @@ void Engine::send_move_and_clocks_to_engine(const string &move, const string &st
       else
          send_engine_cmd("position fen " + startfen + " moves " + movelist);
 
-      if (fixed_time_ms == 0)
+      if (options.tc_depth > 0)
+         send_engine_cmd("go depth " + to_string(options.tc_depth));
+      else if (options.tc_nodes > 0)
+         send_engine_cmd("go nodes " + to_string(options.tc_nodes));
+      else if (fixed_time_ms == 0)
       {
          int64_t wtime, btime;
          wtime = (m_color == WHITE) ? engine_clock_ms : opp_clock_ms;
@@ -474,7 +492,7 @@ void Engine::send_move_and_clocks_to_engine(const string &move, const string &st
    }
    else
    {
-      if (fixed_time_ms == 0)
+      if (fixed_time_ms == 0 && options.tc_depth == 0 && options.tc_nodes == 0)
       {
          send_engine_cmd("time " + to_string(engine_clock_ms / 10));
          send_engine_cmd("otim " + to_string(opp_clock_ms / 10));
