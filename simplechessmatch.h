@@ -50,6 +50,13 @@ private:
    double m_sprt_llr;
    bool m_sprt_test_finished;
 
+   enum SPRT_Decision {
+      SPRT_NONE = -1,
+      SPRT_H0 = 0,
+      SPRT_H1 = 1
+   };
+   SPRT_Decision m_sprt_decision;
+
    vector<PairRecord> m_pair_records;
    vector<string> m_fens_list;
    uint m_engine1_wins_total;

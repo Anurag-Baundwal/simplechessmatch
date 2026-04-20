@@ -79,6 +79,7 @@ MatchManager::MatchManager(void)
    m_sprt_elo1 = 0.0;
    m_sprt_alpha = 0.0;
    m_sprt_beta = 0.0;
+   m_sprt_decision = SPRT_NONE;
    m_engine1_wins_total = 0;
    m_engine2_wins_total = 0;
    m_draws_total = 0;
@@ -320,6 +321,39 @@ void MatchManager::update_stats_from_records(void)
    m_completed_pairs    = completed_pairs;
    m_illegal_moves_total = illegal_moves;
    for (int k = 0; k < 5; k++) m_penta[k] = penta[k];
+
+   // --- Compute LLR and lock in SPRT decision ---
+   if (m_sprt_enabled && !m_sprt_test_finished && m_completed_pairs > 0) {
+      double sum_P = 0.0;
+      double sum_P2 = 0.0;
+      for (int k = 0; k < 5; ++k) {
+         double P = k * 0.5;
+         double count = m_penta[k];
+         sum_P  += count * P;
+         sum_P2 += count * P * P;
+      }
+      double mean_P = sum_P / m_completed_pairs;
+      double var_P  = (sum_P2 / m_completed_pairs) - (mean_P * mean_P);
+      double score  = mean_P / 2.0;
+
+      double E0 = elo_to_score(m_sprt_elo0);
+      double E1 = elo_to_score(m_sprt_elo1);
+
+      if (var_P > 1e-9) {
+         m_sprt_llr = (4.0 * m_completed_pairs / var_P) * (E1 - E0) * (score - (E0 + E1) / 2.0);
+      } else {
+         m_sprt_llr = 0.0;
+      }
+
+      // Lock in the decision as soon as a boundary is crossed
+      if (m_sprt_llr >= m_sprt_upper_bound) {
+         m_sprt_test_finished = true;
+         m_sprt_decision = SPRT_H1;
+      } else if (m_sprt_llr <= m_sprt_lower_bound) {
+         m_sprt_test_finished = true;
+         m_sprt_decision = SPRT_H0;
+      }
+   }
 }
 
 bool MatchManager::check_for_crashes(void)
@@ -419,6 +453,12 @@ int MatchManager::initialize(void)
                   if (swap_sides == 0) m_pair_records[pair_id].g1 = res;
                   else                 m_pair_records[pair_id].g2 = res;
                   lines_loaded++;
+                  
+                  // If both games in the pair are now loaded, evaluate stats immediately
+                  // to catch historical SPRT bounds crossings.
+                  if (m_sprt_enabled && m_pair_records[pair_id].g1 != UNFINISHED && m_pair_records[pair_id].g2 != UNFINISHED) {
+                     update_stats_from_records();
+                  }
                }
             } catch (const exception &e) {
                cout << "Warning: skipping malformed line in resume file (\"" << line << "\"): " << e.what() << "\n";
@@ -625,19 +665,9 @@ void MatchManager::print_results(bool clear_screen)
          ss_output << "SPRT  | " << options.sprt_elo1 << " " << tc_ss.str()
                    << " Threads=" << options.num_threads << " Hash=" << options.mem_size_1 << "MB" << endl;
 
-         double E0 = elo_to_score(m_sprt_elo0);
-         double E1 = elo_to_score(m_sprt_elo1);
-         if (var_P > 1e-9) {
-            m_sprt_llr = (4.0 * N_pairs / var_P) * (E1 - E0) * (score - (E0 + E1) / 2.0);
-         } else {
-            m_sprt_llr = 0.0;
-         }
-
+         // Read the pre-calculated, frozen value
          ss_output << "LLR   | " << m_sprt_llr << " (" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << ") ["
                    << m_sprt_elo0 << ", " << m_sprt_elo1 << "]" << endl;
-
-         if (!m_sprt_test_finished && m_sprt_llr > m_sprt_upper_bound) m_sprt_test_finished = true;
-         else if (!m_sprt_test_finished && m_sprt_llr < m_sprt_lower_bound) m_sprt_test_finished = true;
       }
 
       // Games & Penta
@@ -654,9 +684,9 @@ void MatchManager::print_results(bool clear_screen)
 
       if (m_sprt_enabled && m_sprt_test_finished) {
          ss_output << "\nSPRT test finished: ";
-         if (m_sprt_llr >= m_sprt_upper_bound)
-            ss_output << "H1 accepted (engine 1 is stronger)." << endl;
-         else
+         if (m_sprt_decision == SPRT_H1)
+            ss_output << "H1 accepted (Engine 1 is stronger)." << endl;
+         else if (m_sprt_decision == SPRT_H0)
             ss_output << "H0 accepted (elo is within bounds)." << endl;
       }
    }
