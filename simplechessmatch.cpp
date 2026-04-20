@@ -662,8 +662,24 @@ void MatchManager::print_results(bool clear_screen)
          } else {
             tc_ss << options.tc_ms / 1000 << "+" << fixed << setprecision(2) << (float)options.tc_inc_ms / 1000.0;
          }
+
+         // Format Engine Search Threads (Cores)
+         string thread_str;
+         if (options.num_cores_1 == options.num_cores_2)
+            thread_str = "Th=" + to_string(options.num_cores_1);
+         else
+            thread_str = "Th=" + to_string(options.num_cores_1) + "/" + to_string(options.num_cores_2);
+
+         // Format Hash Memory
+         string hash_str;
+         if (options.mem_size_1 == options.mem_size_2)
+            hash_str = "Hash=" + to_string(options.mem_size_1) + "MB";
+         else
+            hash_str = "Hash=" + to_string(options.mem_size_1) + "MB" + "/" + to_string(options.mem_size_2) + "MB";
+
          ss_output << "SPRT  | " << options.sprt_elo1 << " " << tc_ss.str()
-                   << " Threads=" << options.num_threads << " Hash=" << options.mem_size_1 << "MB" << endl;
+                   << " " << thread_str << " " << hash_str 
+                   << " Conc=" << options.num_threads << endl;
 
          // Read the pre-calculated, frozen value
          ss_output << "LLR   | " << m_sprt_llr << " (" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << ") ["
