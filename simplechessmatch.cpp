@@ -5,11 +5,6 @@ namespace po = boost::program_options;
 struct options_info options;
 MatchManager match_mgr;
 
-// Helper function to convert elo to expected score
-double elo_to_score(double elo) {
-    return 1.0 / (1.0 + pow(10.0, -elo / 400.0));
-}
-
 int main(int argc, char* argv[])
 {
    cout << "simplechessmatch\n";
@@ -269,6 +264,106 @@ bool MatchManager::get_next_game(string &fen, bool &swap_sides, uint &pair_id)
    return false;
 }
 
+// -------------------------------------------------------------------------
+// FISHTEST MLE STATISTICAL FUNCTIONS
+// -------------------------------------------------------------------------
+
+double MatchManager::secular(const double a[5], const double p[5]) {
+   double v = 1e9, w = -1e9;
+   for (int k = 0; k < 5; ++k) {
+      if (p[k] > 0.0) {
+         if (a[k] < v) v = a[k];
+         if (a[k] > w) w = a[k];
+      }
+   }
+   if (v * w >= 0.0) return 0.0; // Safeguard (won't trigger with regularized data)
+   
+   double L = -1.0 / w + 1e-9;
+   double U = -1.0 / v - 1e-9;
+   
+   double x = 0.0;
+   for (int iter = 0; iter < 100; ++iter) {
+      x = 0.5 * (L + U);
+      if (x == L || x == U) break;
+      double f = 0.0;
+      for (int k = 0; k < 5; ++k) {
+         f += p[k] * a[k] / (1.0 + x * a[k]);
+      }
+      if (f > 0.0) L = x;
+      else U = x;
+   }
+   return x;
+}
+
+void MatchManager::MLE_expected(const double a[5], const double p[5], double s, double p_MLE[5]) {
+   double a_shifted[5];
+   for (int k = 0; k < 5; ++k) a_shifted[k] = a[k] - s;
+   double x = secular(a_shifted, p);
+   for (int k = 0; k < 5; ++k) p_MLE[k] = p[k] / (1.0 + x * a_shifted[k]);
+}
+
+void MatchManager::MLE_t_value(const double a[5], const double p_hat[5], double ref, double t_target, double p_MLE[5]) {
+   for (int k = 0; k < 5; ++k) p_MLE[k] = 0.2; // uniform initialization
+   
+   for (int iter = 0; iter < 10; ++iter) {
+      double p_prev[5];
+      for (int k = 0; k < 5; ++k) p_prev[k] = p_MLE[k];
+      
+      double mu = 0.0, var = 0.0;
+      for (int k = 0; k < 5; ++k) mu += p_MLE[k] * a[k];
+      for (int k = 0; k < 5; ++k) var += p_MLE[k] * (a[k] - mu) * (a[k] - mu);
+      double sigma = sqrt(var);
+      
+      double a_shifted[5];
+      for (int k = 0; k < 5; ++k) {
+         double z = (mu - a[k]) / sigma;
+         a_shifted[k] = a[k] - ref - t_target * sigma * (1.0 + z * z) / 2.0;
+      }
+      
+      double x = secular(a_shifted, p_hat);
+      
+      double max_diff = 0.0;
+      for (int k = 0; k < 5; ++k) {
+         p_MLE[k] = p_hat[k] / (1.0 + x * a_shifted[k]);
+         double diff = std::abs(p_prev[k] - p_MLE[k]);
+         if (diff > max_diff) max_diff = diff;
+      }
+      if (max_diff < 1e-9) break;
+   }
+}
+
+double MatchManager::LLR_logistic(const double p_hat[5], double s0, double s1) {
+   double a[5] = {0.0, 0.25, 0.5, 0.75, 1.0};
+   double p_MLE0[5], p_MLE1[5];
+   MLE_expected(a, p_hat, s0, p_MLE0);
+   MLE_expected(a, p_hat, s1, p_MLE1);
+   
+   double llr = 0.0;
+   for (int k = 0; k < 5; ++k) {
+      llr += p_hat[k] * log(p_MLE1[k] / p_MLE0[k]);
+   }
+   return llr;
+}
+
+double MatchManager::LLR_normalized(const double p_hat[5], double nelo0, double nelo1) {
+   double nelo_divided_by_nt = 800.0 / log(10.0);
+   double t0 = (nelo0 / nelo_divided_by_nt) * sqrt(2.0);
+   double t1 = (nelo1 / nelo_divided_by_nt) * sqrt(2.0);
+   
+   double a[5] = {0.0, 0.25, 0.5, 0.75, 1.0};
+   double p_MLE0[5], p_MLE1[5];
+   MLE_t_value(a, p_hat, 0.5, t0, p_MLE0);
+   MLE_t_value(a, p_hat, 0.5, t1, p_MLE1);
+   
+   double llr = 0.0;
+   for (int k = 0; k < 5; ++k) {
+      llr += p_hat[k] * log(p_MLE1[k] / p_MLE0[k]);
+   }
+   return llr;
+}
+
+// -------------------------------------------------------------------------
+
 void MatchManager::update_stats_from_records(void)
 {
    uint e1_wins = 0, e2_wins = 0, draws = 0;
@@ -322,27 +417,30 @@ void MatchManager::update_stats_from_records(void)
    m_illegal_moves_total = illegal_moves;
    for (int k = 0; k < 5; k++) m_penta[k] = penta[k];
 
-   // --- Compute LLR and lock in SPRT decision ---
+   // --- Compute LLR using GSPRT / MLE and lock in SPRT decision ---
    if (m_sprt_enabled && !m_sprt_test_finished && m_completed_pairs > 0) {
-      double sum_P = 0.0;
-      double sum_P2 = 0.0;
+      
+      // 1. Fishtest regularize() function logic
+      double R[5];
       for (int k = 0; k < 5; ++k) {
-         double P = k * 0.5;
-         double count = m_penta[k];
-         sum_P  += count * P;
-         sum_P2 += count * P * P;
+         R[k] = m_penta[k];
+         if (R[k] == 0.0) R[k] = 1e-3; // The exact Fishtest epsilon
       }
-      double mean_P = sum_P / m_completed_pairs;
-      double var_P  = (sum_P2 / m_completed_pairs) - (mean_P * mean_P);
-      double score  = mean_P / 2.0;
+      
+      // 2. Compute probabilities
+      double N = 0.0;
+      for (int k = 0; k < 5; ++k) N += R[k];
+      
+      double p_hat[5];
+      for (int k = 0; k < 5; ++k) p_hat[k] = R[k] / N;
 
-      double E0 = elo_to_score(m_sprt_elo0);
-      double E1 = elo_to_score(m_sprt_elo1);
-
-      if (var_P > 1e-9) {
-         m_sprt_llr = (4.0 * m_completed_pairs / var_P) * (E1 - E0) * (score - (E0 + E1) / 2.0);
+      // 3. Compute LLR using exact models
+      if (options.sprt_elo_model == "normalized") {
+         m_sprt_llr = N * LLR_normalized(p_hat, m_sprt_elo0, m_sprt_elo1);
       } else {
-         m_sprt_llr = 0.0;
+         double s0 = 1.0 / (1.0 + pow(10.0, -m_sprt_elo0 / 400.0));
+         double s1 = 1.0 / (1.0 + pow(10.0, -m_sprt_elo1 / 400.0));
+         m_sprt_llr = N * LLR_logistic(p_hat, s0, s1);
       }
 
       // Lock in the decision as soon as a boundary is crossed
@@ -388,8 +486,8 @@ int MatchManager::initialize(void)
       m_sprt_llr = 0.0;
       m_sprt_test_finished = false;
       cout << "SPRT test enabled with elo0=" << m_sprt_elo0 << ", elo1=" << m_sprt_elo1
-           << ", alpha=" << m_sprt_alpha << ", beta=" << m_sprt_beta << "\n";
-      cout << "SPRT bounds: [" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << "]\n";
+           << ", alpha=" << m_sprt_alpha << ", beta=" << m_sprt_beta << " (" << options.sprt_elo_model << ")\n";
+      cout << "SPRT bounds:[" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << "]\n";
    }
 
    if (!options.fens_filename.empty())
@@ -627,31 +725,60 @@ void MatchManager::print_results(bool clear_screen)
    if (N_pairs == 0) {
       ss_output << "No game pairs completed yet." << endl;
    } else {
-      double sum_P = 0.0;
-      double sum_P2 = 0.0;
+      // 1. Calculate probabilities for each pentanomial outcome
+      double p[5] = {0.0};
       for (int k = 0; k < 5; ++k) {
-         double P     = k * 0.5;
-         double count = m_penta[k];
-         sum_P  += count * P;
-         sum_P2 += count * P * P;
+         p[k] = (double)m_penta[k] / N_pairs;
       }
-      double mean_P = sum_P / N_pairs;
-      double var_P  = (sum_P2 / N_pairs) - (mean_P * mean_P);
-      double score  = mean_P / 2.0;
+
+      // 2. Calculate the per-game expected score (in range [0, 1])
+      double score = 0.0;
+      for (int k = 0; k < 5; ++k) score += p[k] * (k * 0.25);
+
+      // 3. Calculate the variance of the pair average
+      double var_pair_avg = 0.0;
+      for (int k = 0; k < 5; ++k) {
+         double diff = (k * 0.25) - score;
+         var_pair_avg += p[k] * diff * diff;
+      }
 
       ss_output << fixed << setprecision(2);
 
-      // Elo
+      
+      // Determine label based on Elo model
+      string elo_label = (options.sprt_elo_model == "normalized") ? "nElo  | " : "Elo   | ";
+
+      // Display Elo
       if (score <= 1e-9 || score >= 1.0 - 1e-9) {
-         ss_output << "Elo   | " << (score > 0.5 ? "+inf" : "-inf") << endl;
+         ss_output << elo_label << (score > 0.5 ? "+inf" : "-inf") << endl;
       } else {
-         double var_per_game            = var_P / 4.0;
-         double std_error_of_mean_score = sqrt(var_per_game / N_pairs);
-         double elo_per_score           = 400.0 / (score * (1.0 - score) * log(10.0));
-         double std_error_of_elo        = elo_per_score * std_error_of_mean_score;
-         double elo_margin              = 1.96 * std_error_of_elo;
-         double elo_diff                = -400.0 * log10(1.0 / score - 1.0);
-         ss_output << "Elo   | " << elo_diff << " +- " << elo_margin << " (95%)" << endl;
+         double std_error_of_mean_score = sqrt(var_pair_avg / N_pairs);
+
+         if (options.sprt_elo_model == "normalized") {
+            // Fishtest defines per-game variance as 2 * variance of the pair average
+            double sigma_pg = sqrt(2.0 * var_pair_avg);
+            
+            if (sigma_pg > 1e-9) {
+               // Calculate nElo using the true per-game standard deviation
+               double nt = (score - 0.5) / sigma_pg;
+               double nElo = nt * (800.0 / log(10.0));
+               
+               // Error margin scales inversely with sigma_pg
+               double std_err_nt = std_error_of_mean_score / sigma_pg;
+               double margin_nElo = 1.96 * std_err_nt * (800.0 / log(10.0));
+               
+               ss_output << elo_label << nElo << " +- " << margin_nElo << " (95%)" << endl;
+            } else {
+               ss_output << elo_label << "0.00 +- 0.00 (95%)" << endl;
+            }
+         } else {
+            // Logistic Elo Calculation
+            double elo_per_score = 400.0 / (score * (1.0 - score) * log(10.0));
+            double std_error_of_elo = elo_per_score * std_error_of_mean_score;
+            double elo_margin = 1.96 * std_error_of_elo;
+            double elo_diff = -400.0 * log10(1.0 / score - 1.0);
+            ss_output << elo_label << elo_diff << " +- " << elo_margin << " (95%)" << endl;
+         }
       }
 
       // SPRT
@@ -682,7 +809,7 @@ void MatchManager::print_results(bool clear_screen)
                    << " Conc=" << options.num_threads << endl;
 
          // Read the pre-calculated, frozen value
-         ss_output << "LLR   | " << m_sprt_llr << " (" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << ") ["
+         ss_output << "LLR   | " << m_sprt_llr << " (" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << ")["
                    << m_sprt_elo0 << ", " << m_sprt_elo1 << "]" << endl;
       }
 
@@ -694,7 +821,7 @@ void MatchManager::print_results(bool clear_screen)
       if (illegal_move_games != 0)
          ss << "  [Illegal Moves: " << illegal_move_games << "]";
       if ((engine1_losses_on_time != 0) || (engine2_losses_on_time != 0))
-         ss << "  [Timeouts: " << engine1_losses_on_time << " / " << engine2_losses_on_time << "]";
+         ss << "[Timeouts: " << engine1_losses_on_time << " / " << engine2_losses_on_time << "]";
       if (ss.str().length() > 0)
          ss_output << "Info  |" << ss.str() << endl;
 
@@ -770,6 +897,7 @@ int parse_cmd_line_options(int argc, char* argv[])
          ("pmoves",     "print out all moves")
          // SPRT options
          ("sprt",       "Enable SPRT test. Test stops when bounds are reached.")
+         ("sprt-elo-model", po::value<string>(&options.sprt_elo_model)->default_value("normalized"), "SPRT Elo model ('normalized' or 'logistic')")
          ("sprt-elo0",  po::value<double>(&options.sprt_elo0)->default_value(0.0), "SPRT H0 (null hypothesis) Elo.")
          ("sprt-elo1",  po::value<double>(&options.sprt_elo1)->default_value(5.0), "SPRT H1 (alternative hypothesis) Elo.")
          ("sprt-alpha", po::value<double>(&options.sprt_alpha)->default_value(0.05), "SPRT alpha (type I error).")
@@ -797,6 +925,13 @@ int parse_cmd_line_options(int argc, char* argv[])
       options.early_win         = (var_map.count("earlywin") != 0);
       options.early_draw        = (var_map.count("earlydraw") != 0);
       options.sprt_enabled      = (var_map.count("sprt") != 0);
+
+      // Model Validation
+      if (options.sprt_elo_model != "normalized" && options.sprt_elo_model != "logistic")
+      {
+         cerr << "error: --sprt-elo-model must be 'normalized' or 'logistic'\n";
+         return 0;
+      }
    }
    catch (exception &e)
    {

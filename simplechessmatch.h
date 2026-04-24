@@ -85,4 +85,11 @@ private:
    bool get_next_game(string &fen, bool &swap_sides, uint &pair_id);
    void update_stats_from_records(void);
    bool check_for_crashes(void);
+   
+   // Fishtest Statistical LLR Functions
+   double secular(const double a[5], const double p[5]);
+   void MLE_expected(const double a[5], const double p[5], double s, double p_MLE[5]);
+   void MLE_t_value(const double a[5], const double p_hat[5], double ref, double t_target, double p_MLE[5]);
+   double LLR_logistic(const double p_hat[5], double s0, double s1);
+   double LLR_normalized(const double p_hat[5], double nelo0, double nelo1);
 };
