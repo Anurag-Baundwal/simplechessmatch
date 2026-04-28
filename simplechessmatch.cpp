@@ -746,7 +746,7 @@ void MatchManager::print_results(bool clear_screen)
 
       
       // Determine label based on Elo model
-      string elo_label = (options.sprt_elo_model == "normalized") ? "nElo  | " : "Elo   | ";
+      string elo_label = (options.sprt_elo_model == "normalized") ? "Elo   | " : "Elo   | ";
 
       // Display Elo
       if (score <= 1e-9 || score >= 1.0 - 1e-9) {
@@ -809,7 +809,7 @@ void MatchManager::print_results(bool clear_screen)
                    << " Conc=" << options.num_threads << endl;
 
          // Read the pre-calculated, frozen value
-         ss_output << "LLR   | " << m_sprt_llr << " (" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << ")["
+         ss_output << "LLR   | " << m_sprt_llr << " (" << m_sprt_lower_bound << ", " << m_sprt_upper_bound << ") ["
                    << m_sprt_elo0 << ", " << m_sprt_elo1 << "]" << endl;
       }
 
