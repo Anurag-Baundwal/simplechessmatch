@@ -383,28 +383,32 @@ void Engine::check_engine_output(void)
 
       if (m_line.rfind("info string", 0) == 0)
       {
-         if (m_line.find("Invalid move", 0) != string::npos)
+         string line_lower;
+         convert_to_lowercase(m_line, line_lower);
+
+         if ((line_lower.find("illegal move") != string::npos) || (line_lower.find("invalid move") != string::npos))
          {
             cout << "Illegal move reported by " << m_name << "\n";
             m_result = ERROR_ILLEGAL_MOVE;
          }
-         else if (m_line.find("Invalid FEN", 0) != string::npos)
+         else if ((line_lower.find("invalid fen", 0) != string::npos) || (line_lower.find("invalid position", 0) != string::npos) ||
+                  (line_lower.find("illegal fen", 0) != string::npos) || (line_lower.find("illegal position", 0) != string::npos))
          {
             cout << "Invalid position reported by " << m_name << "\n";
             m_result = ERROR_INVALID_POSITION;
          }
          // 4pchess (https://github.com/obryanlouis/4pchess) uses "RY won" / "BG won" / "Stalemate".
-         else if (m_line.find("White won") != string::npos)
+         else if (line_lower.find("white won") != string::npos)
             m_result = WHITE_WIN;
-         else if (m_line.find("Black won") != string::npos)
+         else if (line_lower.find("black won") != string::npos)
             m_result = BLACK_WIN;
-         else if (m_line.find("RY won") != string::npos)
+         else if (line_lower.find("ry won") != string::npos)
             m_result = WHITE_WIN;
-         else if (m_line.find("BG won") != string::npos)
+         else if (line_lower.find("bg won") != string::npos)
             m_result = BLACK_WIN;
-         else if (m_line.find("Stalemate") != string::npos)
+         else if (line_lower.find("stalemate") != string::npos)
             m_result = DRAW;
-         else if (m_line.find("offer draw") != string::npos)
+         else if (line_lower.find("offer draw") != string::npos)
             m_offered_draw = true;
       }
    }
@@ -730,4 +734,11 @@ player_color get_color_to_move_from_fen(const string &fen)
 
    cout << "Warning: couldn't get color to move from FEN: " << fen << "\n";
    return WHITE;
+}
+
+void convert_to_lowercase(const string &input_str, string &output_str)
+{
+   output_str = input_str;
+   for (auto &c : output_str)
+      c = tolower(c);
 }

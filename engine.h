@@ -42,6 +42,7 @@ void lstrip(string &s);
 string get_first_token(const string &s, size_t pos);
 vector<string> get_tokens(const string &s);
 player_color get_color_to_move_from_fen(const string &fen);
+void convert_to_lowercase(const string &input_str, string &output_str);
 
 class Engine
 {
