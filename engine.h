@@ -1,3 +1,6 @@
+#ifndef ENGINE_H
+#define ENGINE_H
+
 #include <boost/process.hpp>
 #include <string>
 #include <iostream>
@@ -144,4 +147,14 @@ struct options_info
    string variant;
    string pgn_filename;
    string pgn4_filename;
+
+   // SPRT options
+   bool sprt_enabled;
+   string sprt_elo_model;
+   double sprt_elo0;
+   double sprt_elo1;
+   double sprt_alpha;
+   double sprt_beta;
 };
+
+#endif // ENGINE_H

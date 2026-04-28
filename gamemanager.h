@@ -1,3 +1,6 @@
+#ifndef GAMEMANAGER_H
+#define GAMEMANAGER_H
+
 #include "engine.h"
 #include <thread>
 #include <atomic>
@@ -15,13 +18,16 @@ public:
    uint m_engine1_losses_on_time;
    uint m_engine2_losses_on_time;
    uint m_illegal_move_games;
-   bool m_thread_running;
+   atomic<bool> m_thread_running;
    bool m_swap_sides;
-   bool m_error;
-   bool m_engine_disconnected;
+   atomic<bool> m_error;
+   atomic<bool> m_engine_disconnected;
    string m_fen;
    string m_pgn;
    atomic<bool> m_pgn_valid;
+
+   game_result m_final_result;
+   uint m_pair_id;
 
 private:
    string m_move_list;
@@ -53,3 +59,5 @@ private:
    bool check_for_repetition_draw(void);
    game_result check_for_adjudication(Engine *white_engine, Engine *black_engine);
 };
+
+#endif // GAMEMANAGER_H

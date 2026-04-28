@@ -1,4 +1,6 @@
 #include "engine.h"
+#include "logger.h"
+#include "simplechessmatch.h"
 
 namespace bp = boost::process;
 
@@ -121,7 +123,7 @@ void Engine::send_engine_cmd(const string &cmd)
    if (is_running())
    {
       if (m_debug)
-         cout << "TO ENGINE " << m_ID << ": " << cmd << "\n";
+         log_debug(m_number, "TO ENGINE " + to_string(m_ID) + ": " + cmd);
       m_in_stream << cmd << "\n";
       m_in_stream.flush();
    }
@@ -140,13 +142,13 @@ int Engine::readline(void)
    if (m_out_stream.eof())
    {
       if (m_debug)
-         cout << "ENGINE " << m_ID << " DISCONNECTED\n";
+         log_debug(m_number, "ENGINE " + to_string(m_ID) + " DISCONNECTED");
       return 0;
    }
    rstrip(m_line);
    lstrip(m_line);
    if (m_debug)
-      cout << "FROM ENGINE " << m_ID << ": " << m_line << "\n";
+      log_debug(m_number, "FROM ENGINE " + to_string(m_ID) + ": " + m_line);
    return 1;
 }
 
@@ -388,13 +390,13 @@ void Engine::check_engine_output(void)
 
          if ((line_lower.find("illegal move") != string::npos) || (line_lower.find("invalid move") != string::npos))
          {
-            cout << "Illegal move reported by " << m_name << "\n";
+            log_event("Illegal move reported by " + m_name);
             m_result = ERROR_ILLEGAL_MOVE;
          }
          else if ((line_lower.find("invalid fen", 0) != string::npos) || (line_lower.find("invalid position", 0) != string::npos) ||
                   (line_lower.find("illegal fen", 0) != string::npos) || (line_lower.find("illegal position", 0) != string::npos))
          {
-            cout << "Invalid position reported by " << m_name << "\n";
+            log_event("Invalid position reported by " + m_name);
             m_result = ERROR_INVALID_POSITION;
          }
          // 4pchess (https://github.com/obryanlouis/4pchess) uses "RY won" / "BG won" / "Stalemate".
@@ -419,12 +421,12 @@ void Engine::check_engine_output(void)
       if ((m_line.rfind("Illegal move:", 0) == 0) ||
           (m_line.rfind("Error (unknown command): " + m_opponent_move) == 0))
       {
-         cout << "Illegal move reported by " << m_name << "\n";
+         log_event("Illegal move reported by " + m_name);
          m_result = ERROR_ILLEGAL_MOVE;
       }
       else if (m_line.rfind("tellusererror Illegal position", 0) == 0)
       {
-         cout << "Invalid position reported by " << m_name << "\n";
+         log_event("Invalid position reported by " + m_name);
          m_result = ERROR_INVALID_POSITION;
       }
       else if (m_line.rfind("resign", 0) == 0)
@@ -524,7 +526,7 @@ void Engine::force_exit(void)
    if (is_running())
    {
       m_child_proc->terminate();
-      cout << m_name << " (" << m_ID << "): forced exit\n";
+      log_event(m_name + " (" + to_string(m_ID) + "): forced exit");
    }
 }
 
@@ -732,7 +734,7 @@ player_color get_color_to_move_from_fen(const string &fen)
    if (fen.find(" b ") != string::npos)
       return BLACK;
 
-   cout << "Warning: couldn't get color to move from FEN: " << fen << "\n";
+   log_event("Warning: couldn't get color to move from FEN: " + fen);
    return WHITE;
 }
 

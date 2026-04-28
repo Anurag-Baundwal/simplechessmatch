@@ -1,4 +1,6 @@
 #include "gamemanager.h"
+#include "logger.h"
+#include "simplechessmatch.h"
 
 extern struct options_info options;
 
@@ -23,6 +25,9 @@ GameManager::GameManager(void)
    m_black_clock_ms = chrono::milliseconds(0);
    m_pgn_valid = false;
    m_move_list.reserve(1000);
+
+   m_final_result = UNFINISHED;
+   m_pair_id = 0;
 }
 
 GameManager::~GameManager(void)
@@ -70,10 +75,12 @@ void GameManager::game_runner(void)
 
    if ((result == ERROR_ILLEGAL_MOVE) || (result == ERROR_INVALID_POSITION) || (result == UNDETERMINED))
    {
-      cout << "\n" << m_fen << "\n" << m_move_list << "\n";
+      log_event("Game Error: FEN: " + m_fen + " | Moves: " + m_move_list);
       if (m_num_moves > 0)
-         cout << "\n" << m_pgn << "\n";
+         log_event("PGN:\n" + m_pgn);
    }
+
+   m_final_result = result;
 
    m_thread_running = false;
 }
@@ -114,13 +121,13 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
    if (white_engine->engine_new_game_setup(WHITE, m_turn, start_time_ms.count(), increment_ms.count(), fixed_time_ms.count(), m_fen, options.variant) == 0)
    {
       if (!white_engine->m_quit_cmd_sent)
-         cout << "Error: " << white_engine->m_name << " could not start a new game.\n";
+         log_event("Error: " + white_engine->m_name + " could not start a new game.");
       return ERROR_ENGINE_DISCONNECTED;
    }
    if (black_engine->engine_new_game_setup(BLACK, m_turn, start_time_ms.count(), increment_ms.count(), fixed_time_ms.count(), m_fen, options.variant) == 0)
    {
       if (!black_engine->m_quit_cmd_sent)
-         cout << "Error: " << black_engine->m_name << " could not start a new game.\n";
+         log_event("Error: " + black_engine->m_name + " could not start a new game.");
       return ERROR_ENGINE_DISCONNECTED;
    }
 
@@ -147,7 +154,7 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          if (!white_engine->get_engine_move())
          {
             if (!white_engine->m_quit_cmd_sent)
-               cout << "Error: " << white_engine->m_name << " disconnected.\n";
+               log_event("Error: " + white_engine->m_name + " disconnected.");
             return ERROR_ENGINE_DISCONNECTED;
          }
          if (white_engine->m_move.empty())
@@ -156,7 +163,7 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          m_white_clock_ms = m_white_clock_ms - elapsed_time_ms;
          if (m_white_clock_ms.count() < (0 - (int)options.margin_ms))
          {
-            cout << white_engine->m_name << " (white) ran out of time. " << m_white_clock_ms.count() << " ms\n";
+            log_event(white_engine->m_name + " (white) ran out of time. " + to_string(m_white_clock_ms.count()) + " ms");
             m_loss_on_time = true;
             result = BLACK_WIN;
             break;
@@ -167,15 +174,15 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          black_engine->send_move_and_clocks_to_engine(white_engine->m_move, m_fen, m_move_list, m_black_clock_ms.count(), m_white_clock_ms.count(), increment_ms.count(), fixed_time_ms.count());
          m_timestamp = chrono::steady_clock::now();
          if (options.print_moves)
-            cout << "white moved: " << white_engine->m_move << ",   elapsed: " << elapsed_time_ms.count() << " ms,   white clock: "
-                 << m_white_clock_ms.count() << " ms,  eval: " << white_engine->get_eval() << "\n";
+            log_move("white moved: " + white_engine->m_move + ",   elapsed: " + to_string(elapsed_time_ms.count()) + " ms,   white clock: "
+                     + to_string(m_white_clock_ms.count()) + " ms,  eval: " + white_engine->get_eval());
       }
       else
       {
          if (!black_engine->get_engine_move())
          {
             if (!black_engine->m_quit_cmd_sent)
-               cout << "Error: " << black_engine->m_name << " disconnected.\n";
+               log_event("Error: " + black_engine->m_name + " disconnected.");
             return ERROR_ENGINE_DISCONNECTED;
          }
          if (black_engine->m_move.empty())
@@ -184,7 +191,7 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          m_black_clock_ms = m_black_clock_ms - elapsed_time_ms;
          if (m_black_clock_ms.count() < (0 - (int)options.margin_ms))
          {
-            cout << black_engine->m_name << " (black) ran out of time. " << m_black_clock_ms.count() << " ms\n";
+            log_event(black_engine->m_name + " (black) ran out of time. " + to_string(m_black_clock_ms.count()) + " ms");
             m_loss_on_time = true;
             result = WHITE_WIN;
             break;
@@ -195,8 +202,8 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          white_engine->send_move_and_clocks_to_engine(black_engine->m_move, m_fen, m_move_list, m_white_clock_ms.count(), m_black_clock_ms.count(), increment_ms.count(), fixed_time_ms.count());
          m_timestamp = chrono::steady_clock::now();
          if (options.print_moves)
-            cout << "black moved: " << black_engine->m_move << ",   elapsed: " << elapsed_time_ms.count() << " ms,   black clock: "
-                 << m_black_clock_ms.count() << " ms,  eval: " << black_engine->get_eval() << "\n";
+            log_move("black moved: " + black_engine->m_move + ",   elapsed: " + to_string(elapsed_time_ms.count()) + " ms,   black clock: "
+                     + to_string(m_black_clock_ms.count()) + " ms,  eval: " + black_engine->get_eval());
       }
 
       m_turn = (m_turn == WHITE) ? BLACK : WHITE;
@@ -230,18 +237,18 @@ bool GameManager::is_engine_unresponsive(void)
       if ((elapsed_time_ms > 5s) && (!m_engine1.m_is_ready || !m_engine2.m_is_ready))
       {
          if (!m_engine1.m_is_ready)
-            cout << "Error: " << m_engine1.m_name << " (" << m_engine1.m_ID << ") is not ready after 5 seconds.\n";
+            log_event("Error: " + m_engine1.m_name + " (" + to_string(m_engine1.m_ID) + ") is not ready after 5 seconds.");
          else
-            cout << "Error: " << m_engine2.m_name << " (" << m_engine2.m_ID << ") is not ready after 5 seconds.\n";
+            log_event("Error: " + m_engine2.m_name + " (" + to_string(m_engine2.m_ID) + ") is not ready after 5 seconds.");
          return true;
       }
 
       if ((clock_ms - elapsed_time_ms) < -10s)
       {
          if (((m_turn == WHITE) && !m_swap_sides) || ((m_turn == BLACK) && m_swap_sides))
-            cout << "Error: " << m_engine1.m_name << " (" << m_engine1.m_ID << ") is not moving (clock < -10s).\n";
+            log_event("Error: " + m_engine1.m_name + " (" + to_string(m_engine1.m_ID) + ") is not moving (clock < -10s).");
          else
-            cout << "Error: " << m_engine2.m_name << " (" << m_engine2.m_ID << ") is not moving (clock < -10s).\n";
+            log_event("Error: " + m_engine2.m_name + " (" + to_string(m_engine2.m_ID) + ") is not moving (clock < -10s).");
          return true;
       }
    }
@@ -275,7 +282,7 @@ game_result GameManager::determine_game_result(Engine *white_engine, Engine *bla
    }
    else if (white_engine->got_decisive_result() && black_engine->got_decisive_result() && (white_result != black_result))
    {
-      cout << "Error: engines disagree on game result. " << white_result << ", " << black_result << "; " << white_engine->m_offered_draw << ", " << black_engine->m_offered_draw << "\n";
+      log_event("Error: engines disagree on game result. White result enum: " + to_string((int)white_result) + ", Black result enum: " + to_string((int)black_result));
       m_error = true;
       result = UNDETERMINED;
    }
@@ -303,7 +310,7 @@ game_result GameManager::determine_game_result(Engine *white_engine, Engine *bla
    }
    else if (m_num_moves >= options.max_moves)
    {
-      cout << "Draw due to maximum number of moves reached\n";
+      log_event("Draw due to maximum number of moves reached");
       result = DRAW;
    }
    else if ((white_result == UNFINISHED) && (black_result == UNFINISHED))
@@ -483,12 +490,12 @@ game_result GameManager::check_for_adjudication(Engine *white_engine, Engine *bl
 {
    if (white_engine->m_offered_draw && black_engine->m_offered_draw)
    {
-      cout << "Draw by agreement (# moves = " << m_num_moves << ")\n";
+      log_event("Draw by agreement (# moves = " + to_string(m_num_moves) + ")");
       return DRAW;
    }
    if (check_for_repetition_draw())
    {
-      cout << "Draw by repetition (# moves = " << m_num_moves << ")\n";
+      log_event("Draw by repetition (# moves = " + to_string(m_num_moves) + ")");
       m_repetition_draw = true;
       return DRAW;
    }
@@ -507,7 +514,7 @@ game_result GameManager::check_for_adjudication(Engine *white_engine, Engine *bl
          m_drawish_count = 0;
       if (m_drawish_count >= options.draw_moves)
       {
-         cout << "Adjudicated draw (# moves = " << m_num_moves << ")\n";
+         log_event("Adjudicated draw (# moves = " + to_string(m_num_moves) + ")");
          return DRAW;
       }
    }
