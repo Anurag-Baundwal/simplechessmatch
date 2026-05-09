@@ -1,7 +1,16 @@
 #ifndef ENGINE_H
 #define ENGINE_H
 
+#define BOOST_PROCESS_VERSION 1
+
+#include <boost/version.hpp>
+
+#if BOOST_VERSION >= 108800
+#include <boost/process/v1.hpp>
+#else
 #include <boost/process.hpp>
+#endif
+
 #include <string>
 #include <iostream>
 #include <vector>
