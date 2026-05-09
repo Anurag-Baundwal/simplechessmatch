@@ -18,11 +18,9 @@ since it doesn't know the rules of chess. This tool was mainly created for 4-pla
 
 To compile, Boost library must be installed.
 
-**Windows:** Compiling with MS Visual Studio (C++) has been tested and is working.
+**Windows:** Windows binary can be built with MS Visual Studio (C++) or with MSYS2 / g++.
 
-**Linux:** Compiling with g++ has been tested and is working.
-
-g++ -O3 engine.cpp gamemanager.cpp simplechessmatch.cpp -lboost_filesystem -lboost_program_options -o scm
+**Linux:** Linux binary can be built with g++.
 
 ## Command line options
 ```
