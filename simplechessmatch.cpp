@@ -226,12 +226,12 @@ int MatchManager::initialize(void)
       return 0;
    }
 
-   g_event_log.open("events.log", ios::out | ios::app);
+  //  g_event_log.open("events.log", ios::out | ios::app);
    log_event("--- New Match Started ---");
 
-   if (options.debug_1) g_debug1_log.open("debug_engine1.log", ios::out | ios::trunc);
-   if (options.debug_2) g_debug2_log.open("debug_engine2.log", ios::out | ios::trunc);
-   if (options.print_moves) g_moves_log.open("moves.log", ios::out | ios::trunc);
+  //  if (options.debug_1) g_debug1_log.open("debug_engine1.log", ios::out | ios::trunc);
+  //  if (options.debug_2) g_debug2_log.open("debug_engine2.log", ios::out | ios::trunc);
+  //  if (options.print_moves) g_moves_log.open("moves.log", ios::out | ios::trunc);
 
    m_sprt_enabled = options.sprt_enabled;
    if (m_sprt_enabled) {
