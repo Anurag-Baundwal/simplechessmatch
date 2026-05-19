@@ -3,6 +3,7 @@
 #include <atomic>
 
 void convert_move_to_PGN4_format(string &move);
+void convert_move_to_standard_engine_format(string &move);
 
 class GameManager
 {

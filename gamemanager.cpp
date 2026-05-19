@@ -163,6 +163,7 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          }
          m_white_clock_ms = (fixed_time_ms.count() ? (fixed_time_ms) : (m_white_clock_ms + increment_ms));
 
+         convert_move_to_standard_engine_format(white_engine->m_move);
          move_played(white_engine->m_move);
          black_engine->send_move_and_clocks_to_engine(white_engine->m_move, m_fen, m_move_list, m_black_clock_ms.count(), m_white_clock_ms.count(), increment_ms.count(), fixed_time_ms.count());
          m_timestamp = chrono::steady_clock::now();
@@ -191,6 +192,7 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          }
          m_black_clock_ms = (fixed_time_ms.count() ? (fixed_time_ms) : (m_black_clock_ms + increment_ms));
 
+         convert_move_to_standard_engine_format(black_engine->m_move);
          move_played(black_engine->m_move);
          white_engine->send_move_and_clocks_to_engine(black_engine->m_move, m_fen, m_move_list, m_white_clock_ms.count(), m_black_clock_ms.count(), increment_ms.count(), fixed_time_ms.count());
          m_timestamp = chrono::steady_clock::now();
@@ -556,4 +558,22 @@ void convert_move_to_PGN4_format(string &move)
       move.insert(i, "=");
       move[i + 1] = toupper(move[i + 1]);
    }
+}
+
+// workaround for engines that send moves in PGN4 / chess.com format:
+void convert_move_to_standard_engine_format(string &move)
+{
+   // remove the dash character if needed
+   size_t i = move.find('-');
+   if ((i == 2) || (i == 3))
+      move.erase(i, 1);
+
+   // for promotion, remove the equals character and change last character to lowercase
+   i = move.length() - 1;
+   if (i > 4)
+      if (isalpha(move[i]) && move[i - 1] == '=')
+      {
+         move[i] = tolower(move[i]);
+         move.erase(i - 1, 1);
+      }
 }
