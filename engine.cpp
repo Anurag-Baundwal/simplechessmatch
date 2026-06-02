@@ -293,7 +293,15 @@ void Engine::engine_new_game_start(int64_t start_time_ms, int64_t inc_time_ms, i
       if (fixed_time_ms != 0)
          send_engine_cmd("go movetime " + to_string(fixed_time_ms));
       else
-         send_engine_cmd("go wtime " + to_string(start_time_ms) + " btime " + to_string(start_time_ms) + " winc " + to_string(inc_time_ms) + " binc " + to_string(inc_time_ms));
+      {
+         if (options.fourplayerchess && !options.legacy_clocks)
+            send_engine_cmd("go rtime " + to_string(start_time_ms) + " btime " + to_string(start_time_ms) + 
+                            " ytime " + to_string(start_time_ms) + " gtime " + to_string(start_time_ms) + 
+                            " rinc " + to_string(inc_time_ms) + " binc " + to_string(inc_time_ms) + 
+                            " yinc " + to_string(inc_time_ms) + " ginc " + to_string(inc_time_ms));
+         else
+            send_engine_cmd("go wtime " + to_string(start_time_ms) + " btime " + to_string(start_time_ms) + " winc " + to_string(inc_time_ms) + " binc " + to_string(inc_time_ms));
+      }
    }
    else
    {
@@ -456,7 +464,7 @@ void Engine::check_engine_output(void)
    }
 }
 
-void Engine::send_move_and_clocks_to_engine(const string &move, const string &startfen, const string &movelist, int64_t engine_clock_ms, int64_t opp_clock_ms, int64_t inc_ms, int64_t fixed_time_ms)
+void Engine::send_move_and_clocks_to_engine(const string &move, const string &startfen, const string &movelist, int64_t engine_clock_ms, int64_t opp_clock_ms, int64_t rtime, int64_t bltime, int64_t ytime, int64_t gtime, int64_t inc_ms, int64_t fixed_time_ms)
 {
    m_opponent_move = move;
    if (m_uci)
@@ -468,10 +476,19 @@ void Engine::send_move_and_clocks_to_engine(const string &move, const string &st
 
       if (fixed_time_ms == 0)
       {
-         int64_t wtime, btime;
-         wtime = (m_color == WHITE) ? engine_clock_ms : opp_clock_ms;
-         btime = (m_color == WHITE) ? opp_clock_ms : engine_clock_ms;
-         send_engine_cmd("go wtime " + to_string(wtime) + " btime " + to_string(btime) + " winc " + to_string(inc_ms) + " binc " + to_string(inc_ms));
+         if (options.fourplayerchess && !options.legacy_clocks)
+         {
+            send_engine_cmd("go rtime " + to_string(rtime) + " btime " + to_string(bltime) + 
+                            " ytime " + to_string(ytime) + " gtime " + to_string(gtime) + 
+                            " rinc " + to_string(inc_ms) + " binc " + to_string(inc_ms) + 
+                            " yinc " + to_string(inc_ms) + " ginc " + to_string(inc_ms));
+         }
+         else
+         {
+            int64_t wtime = (m_color == WHITE) ? engine_clock_ms : opp_clock_ms;
+            int64_t btime = (m_color == WHITE) ? opp_clock_ms : engine_clock_ms;
+            send_engine_cmd("go wtime " + to_string(wtime) + " btime " + to_string(btime) + " winc " + to_string(inc_ms) + " binc " + to_string(inc_ms));
+         }
       }
       else
          send_engine_cmd("go movetime " + to_string(fixed_time_ms));
@@ -734,6 +751,29 @@ player_color get_color_to_move_from_fen(const string &fen)
 
    cout << "Warning: couldn't get color to move from FEN: " << fen << "\n";
    return WHITE;
+}
+
+player_color_4pc get_color_4pc_to_move_from_fen(const string &fen)
+{
+   if (fen.empty())
+      return RED;
+
+   if (fen.rfind("R-", 0) == 0)
+      return RED;
+   if (fen.rfind("B-", 0) == 0)
+      return BLUE;
+   if (fen.rfind("Y-", 0) == 0)
+      return YELLOW;
+   if (fen.rfind("G-", 0) == 0)
+      return GREEN;
+
+   if (fen.find(" w ") != string::npos)
+      return RED;
+   if (fen.find(" b ") != string::npos)
+      return BLUE;
+
+   cout << "Warning: couldn't get 4PC color to move from FEN: " << fen << "\n";
+   return RED;
 }
 
 void convert_to_lowercase(const string &input_str, string &output_str)

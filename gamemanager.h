@@ -28,6 +28,7 @@ private:
    string m_move_list;
    vector<string> m_move_vector;
    player_color m_turn;
+   player_color_4pc m_turn_4pc;
    uint m_num_moves;
    uint m_drawish_count;
    bool m_loss_on_time;
@@ -36,6 +37,10 @@ private:
                                                               // It's also updated when game_runner starts running.
    chrono::milliseconds m_white_clock_ms;
    chrono::milliseconds m_black_clock_ms;
+   chrono::milliseconds m_red_clock_ms;
+   chrono::milliseconds m_blue_clock_ms;
+   chrono::milliseconds m_yellow_clock_ms;
+   chrono::milliseconds m_green_clock_ms;
 
 public:
    GameManager(void);

@@ -64,6 +64,8 @@ To compile, Boost library must be installed.
                          per line)
   --variant arg          variant name
   --4pc                  enable 4 player chess (teams) mode
+  --legacy-clocks        use legacy 2-clock system instead of independent
+                         4-player clocks
   --continue             continue match if error occurs (e.g. illegal move)
   --pmoves               print out all moves
   --pgn arg              save games in PGN format to specified file name
