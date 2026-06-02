@@ -293,7 +293,15 @@ void Engine::engine_new_game_start(int64_t start_time_ms, int64_t inc_time_ms, i
       if (fixed_time_ms != 0)
          send_engine_cmd("go movetime " + to_string(fixed_time_ms));
       else
-         send_engine_cmd("go wtime " + to_string(start_time_ms) + " btime " + to_string(start_time_ms) + " winc " + to_string(inc_time_ms) + " binc " + to_string(inc_time_ms));
+      {
+         if (options.fourplayerchess)
+            send_engine_cmd("go rtime " + to_string(start_time_ms) + " btime " + to_string(start_time_ms) + 
+                            " ytime " + to_string(start_time_ms) + " gtime " + to_string(start_time_ms) + 
+                            " rinc " + to_string(inc_time_ms) + " binc " + to_string(inc_time_ms) + 
+                            " yinc " + to_string(inc_time_ms) + " ginc " + to_string(inc_time_ms));
+         else
+            send_engine_cmd("go wtime " + to_string(start_time_ms) + " btime " + to_string(start_time_ms) + " winc " + to_string(inc_time_ms) + " binc " + to_string(inc_time_ms));
+      }
    }
    else
    {
@@ -471,7 +479,14 @@ void Engine::send_move_and_clocks_to_engine(const string &move, const string &st
          int64_t wtime, btime;
          wtime = (m_color == WHITE) ? engine_clock_ms : opp_clock_ms;
          btime = (m_color == WHITE) ? opp_clock_ms : engine_clock_ms;
-         send_engine_cmd("go wtime " + to_string(wtime) + " btime " + to_string(btime) + " winc " + to_string(inc_ms) + " binc " + to_string(inc_ms));
+         
+         if (options.fourplayerchess)
+            send_engine_cmd("go rtime " + to_string(wtime) + " btime " + to_string(btime) + 
+                            " ytime " + to_string(wtime) + " gtime " + to_string(btime) + 
+                            " rinc " + to_string(inc_ms) + " binc " + to_string(inc_ms) + 
+                            " yinc " + to_string(inc_ms) + " ginc " + to_string(inc_ms));
+         else
+            send_engine_cmd("go wtime " + to_string(wtime) + " btime " + to_string(btime) + " winc " + to_string(inc_ms) + " binc " + to_string(inc_ms));
       }
       else
          send_engine_cmd("go movetime " + to_string(fixed_time_ms));
