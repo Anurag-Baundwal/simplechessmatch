@@ -98,7 +98,7 @@ public:
    int wait_for_ready(bool check_output);
    int engine_new_game_setup(player_color color, player_color turn, int64_t start_time_ms, int64_t inc_time_ms, int64_t fixed_time_ms, const string &fen, const string &variant);
    void engine_new_game_start(int64_t start_time_ms, int64_t inc_time_ms, int64_t fixed_time_ms);
-   void send_move_and_clocks_to_engine(const string &move, const string &startfen, const string &movelist, int64_t engine_clock_ms, int64_t opp_clock_ms, int64_t inc_ms, int64_t fixed_time_ms);
+   void send_move_and_clocks_to_engine(const string &move, const string &startfen, const string &movelist, int64_t clocks_ms[4], int turn_4pc, int64_t inc_ms, int64_t fixed_time_ms);
    void send_result_to_engine(game_result result);
    bool is_running(void);
    void force_exit(void);

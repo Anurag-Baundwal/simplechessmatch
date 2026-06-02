@@ -1,10 +1,12 @@
 #include "gamemanager.h"
+#include <iostream>
 
 extern struct options_info options;
 
 GameManager::GameManager(void)
 {
    m_turn = WHITE;
+   m_turn_4pc = 0;
    m_engine1_wins = 0;
    m_engine2_wins = 0;
    m_draws = 0;
@@ -19,8 +21,8 @@ GameManager::GameManager(void)
    m_engine_disconnected = false;
    m_num_moves = 0;
    m_drawish_count = 0;
-   m_white_clock_ms = chrono::milliseconds(0);
-   m_black_clock_ms = chrono::milliseconds(0);
+   for (int i = 0; i < 4; i++)
+      m_clocks_ms[i] = chrono::milliseconds(0);
    m_pgn_valid = false;
    m_move_list.reserve(1000);
 }
@@ -98,18 +100,31 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
 
    if (fixed_time_ms.count())
    {
-      m_white_clock_ms = fixed_time_ms;
-      m_black_clock_ms = fixed_time_ms;
+      for (int i = 0; i < 4; i++)
+         m_clocks_ms[i] = fixed_time_ms;
    }
    else
    {
-      m_white_clock_ms = start_time_ms;
-      m_black_clock_ms = start_time_ms;
+      for (int i = 0; i < 4; i++)
+         m_clocks_ms[i] = start_time_ms;
    }
 
    this_thread::sleep_for(100ms);
 
    m_turn = get_color_to_move_from_fen(m_fen);
+
+   if (options.fourplayerchess)
+   {
+      if (m_fen.rfind("R-", 0) == 0) m_turn_4pc = 0;
+      else if (m_fen.rfind("B-", 0) == 0) m_turn_4pc = 1;
+      else if (m_fen.rfind("Y-", 0) == 0) m_turn_4pc = 2;
+      else if (m_fen.rfind("G-", 0) == 0) m_turn_4pc = 3;
+      else m_turn_4pc = (m_turn == WHITE) ? 0 : 1;
+   }
+   else
+   {
+      m_turn_4pc = (m_turn == WHITE) ? 0 : 1;
+   }
 
    if (white_engine->engine_new_game_setup(WHITE, m_turn, start_time_ms.count(), increment_ms.count(), fixed_time_ms.count(), m_fen, options.variant) == 0)
    {
@@ -153,23 +168,42 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          if (white_engine->m_move.empty())
             break; // no legal moves
          elapsed_time_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - m_timestamp);
-         m_white_clock_ms = m_white_clock_ms - elapsed_time_ms;
-         if (m_white_clock_ms.count() < (0 - (int)options.margin_ms))
+         m_clocks_ms[m_turn_4pc] = m_clocks_ms[m_turn_4pc] - elapsed_time_ms;
+         if (m_clocks_ms[m_turn_4pc].count() < (0 - (int)options.margin_ms))
          {
-            cout << white_engine->m_name << " (white) ran out of time. " << m_white_clock_ms.count() << " ms\n";
+            string color_name;
+            if (options.fourplayerchess)
+               color_name = (m_turn_4pc == 0) ? "red" : "yellow";
+            else
+               color_name = "white";
+            cout << white_engine->m_name << " (" << color_name << ") ran out of time. " << m_clocks_ms[m_turn_4pc].count() << " ms\n";
             m_loss_on_time = true;
             result = BLACK_WIN;
             break;
          }
-         m_white_clock_ms = (fixed_time_ms.count() ? (fixed_time_ms) : (m_white_clock_ms + increment_ms));
+         m_clocks_ms[m_turn_4pc] = (fixed_time_ms.count() ? (fixed_time_ms) : (m_clocks_ms[m_turn_4pc] + increment_ms));
 
          convert_move_to_standard_engine_format(white_engine->m_move);
          move_played(white_engine->m_move);
-         black_engine->send_move_and_clocks_to_engine(white_engine->m_move, m_fen, m_move_list, m_black_clock_ms.count(), m_white_clock_ms.count(), increment_ms.count(), fixed_time_ms.count());
+
+         int next_turn_4pc = options.fourplayerchess ? ((m_turn_4pc + 1) % 4) : ((m_turn_4pc + 1) % 2);
+
+         int64_t clocks_to_send[4];
+         for (int i = 0; i < 4; i++) clocks_to_send[i] = m_clocks_ms[i].count();
+
+         black_engine->send_move_and_clocks_to_engine(white_engine->m_move, m_fen, m_move_list, clocks_to_send, next_turn_4pc, increment_ms.count(), fixed_time_ms.count());
          m_timestamp = chrono::steady_clock::now();
          if (options.print_moves)
-            cout << "white moved: " << white_engine->m_move << ",   elapsed: " << elapsed_time_ms.count() << " ms,   white clock: "
-                 << m_white_clock_ms.count() << " ms,  eval: " << white_engine->get_eval() << "\n";
+         {
+            string color_name;
+            if (options.fourplayerchess)
+               color_name = (m_turn_4pc == 0) ? "red" : "yellow";
+            else
+               color_name = "white";
+            cout << color_name << " moved: " << white_engine->m_move << ",   elapsed: " << elapsed_time_ms.count() << " ms,   clock: "
+                 << m_clocks_ms[m_turn_4pc].count() << " ms,  eval: " << white_engine->get_eval() << "\n";
+         }
+         m_turn_4pc = next_turn_4pc;
       }
       else
       {
@@ -182,23 +216,42 @@ game_result GameManager::run_engine_game(chrono::milliseconds start_time_ms, chr
          if (black_engine->m_move.empty())
             break; // no legal moves
          elapsed_time_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - m_timestamp);
-         m_black_clock_ms = m_black_clock_ms - elapsed_time_ms;
-         if (m_black_clock_ms.count() < (0 - (int)options.margin_ms))
+         m_clocks_ms[m_turn_4pc] = m_clocks_ms[m_turn_4pc] - elapsed_time_ms;
+         if (m_clocks_ms[m_turn_4pc].count() < (0 - (int)options.margin_ms))
          {
-            cout << black_engine->m_name << " (black) ran out of time. " << m_black_clock_ms.count() << " ms\n";
+            string color_name;
+            if (options.fourplayerchess)
+               color_name = (m_turn_4pc == 1) ? "blue" : "green";
+            else
+               color_name = "black";
+            cout << black_engine->m_name << " (" << color_name << ") ran out of time. " << m_clocks_ms[m_turn_4pc].count() << " ms\n";
             m_loss_on_time = true;
             result = WHITE_WIN;
             break;
          }
-         m_black_clock_ms = (fixed_time_ms.count() ? (fixed_time_ms) : (m_black_clock_ms + increment_ms));
+         m_clocks_ms[m_turn_4pc] = (fixed_time_ms.count() ? (fixed_time_ms) : (m_clocks_ms[m_turn_4pc] + increment_ms));
 
          convert_move_to_standard_engine_format(black_engine->m_move);
          move_played(black_engine->m_move);
-         white_engine->send_move_and_clocks_to_engine(black_engine->m_move, m_fen, m_move_list, m_white_clock_ms.count(), m_black_clock_ms.count(), increment_ms.count(), fixed_time_ms.count());
+
+         int next_turn_4pc = options.fourplayerchess ? ((m_turn_4pc + 1) % 4) : ((m_turn_4pc + 1) % 2);
+
+         int64_t clocks_to_send[4];
+         for (int i = 0; i < 4; i++) clocks_to_send[i] = m_clocks_ms[i].count();
+
+         white_engine->send_move_and_clocks_to_engine(black_engine->m_move, m_fen, m_move_list, clocks_to_send, next_turn_4pc, increment_ms.count(), fixed_time_ms.count());
          m_timestamp = chrono::steady_clock::now();
          if (options.print_moves)
-            cout << "black moved: " << black_engine->m_move << ",   elapsed: " << elapsed_time_ms.count() << " ms,   black clock: "
-                 << m_black_clock_ms.count() << " ms,  eval: " << black_engine->get_eval() << "\n";
+         {
+            string color_name;
+            if (options.fourplayerchess)
+               color_name = (m_turn_4pc == 1) ? "blue" : "green";
+            else
+               color_name = "black";
+            cout << color_name << " moved: " << black_engine->m_move << ",   elapsed: " << elapsed_time_ms.count() << " ms,   clock: "
+                 << m_clocks_ms[m_turn_4pc].count() << " ms,  eval: " << black_engine->get_eval() << "\n";
+         }
+         m_turn_4pc = next_turn_4pc;
       }
 
       m_turn = (m_turn == WHITE) ? BLACK : WHITE;
@@ -227,7 +280,7 @@ bool GameManager::is_engine_unresponsive(void)
    {
       chrono::milliseconds elapsed_time_ms;
       elapsed_time_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - m_timestamp);
-      chrono::milliseconds clock_ms = (m_turn == WHITE) ? m_white_clock_ms : m_black_clock_ms;
+      chrono::milliseconds clock_ms = m_clocks_ms[m_turn_4pc];
 
       if ((elapsed_time_ms > 5s) && (!m_engine1.m_is_ready || !m_engine2.m_is_ready))
       {

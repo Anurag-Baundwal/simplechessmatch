@@ -293,7 +293,15 @@ void Engine::engine_new_game_start(int64_t start_time_ms, int64_t inc_time_ms, i
       if (fixed_time_ms != 0)
          send_engine_cmd("go movetime " + to_string(fixed_time_ms));
       else
-         send_engine_cmd("go wtime " + to_string(start_time_ms) + " btime " + to_string(start_time_ms) + " winc " + to_string(inc_time_ms) + " binc " + to_string(inc_time_ms));
+      {
+         if (options.fourplayerchess)
+            send_engine_cmd("go rtime " + to_string(start_time_ms) + " btime " + to_string(start_time_ms) + 
+                            " ytime " + to_string(start_time_ms) + " gtime " + to_string(start_time_ms) + 
+                            " rinc " + to_string(inc_time_ms) + " binc " + to_string(inc_time_ms) + 
+                            " yinc " + to_string(inc_time_ms) + " ginc " + to_string(inc_time_ms));
+         else
+            send_engine_cmd("go wtime " + to_string(start_time_ms) + " btime " + to_string(start_time_ms) + " winc " + to_string(inc_time_ms) + " binc " + to_string(inc_time_ms));
+      }
    }
    else
    {
@@ -456,7 +464,7 @@ void Engine::check_engine_output(void)
    }
 }
 
-void Engine::send_move_and_clocks_to_engine(const string &move, const string &startfen, const string &movelist, int64_t engine_clock_ms, int64_t opp_clock_ms, int64_t inc_ms, int64_t fixed_time_ms)
+void Engine::send_move_and_clocks_to_engine(const string &move, const string &startfen, const string &movelist, int64_t clocks_ms[4], int turn_4pc, int64_t inc_ms, int64_t fixed_time_ms)
 {
    m_opponent_move = move;
    if (m_uci)
@@ -468,10 +476,13 @@ void Engine::send_move_and_clocks_to_engine(const string &move, const string &st
 
       if (fixed_time_ms == 0)
       {
-         int64_t wtime, btime;
-         wtime = (m_color == WHITE) ? engine_clock_ms : opp_clock_ms;
-         btime = (m_color == WHITE) ? opp_clock_ms : engine_clock_ms;
-         send_engine_cmd("go wtime " + to_string(wtime) + " btime " + to_string(btime) + " winc " + to_string(inc_ms) + " binc " + to_string(inc_ms));
+         if (options.fourplayerchess)
+            send_engine_cmd("go rtime " + to_string(clocks_ms[0]) + " btime " + to_string(clocks_ms[1]) + 
+                            " ytime " + to_string(clocks_ms[2]) + " gtime " + to_string(clocks_ms[3]) + 
+                            " rinc " + to_string(inc_ms) + " binc " + to_string(inc_ms) + 
+                            " yinc " + to_string(inc_ms) + " ginc " + to_string(inc_ms));
+         else
+            send_engine_cmd("go wtime " + to_string(clocks_ms[0]) + " btime " + to_string(clocks_ms[1]) + " winc " + to_string(inc_ms) + " binc " + to_string(inc_ms));
       }
       else
          send_engine_cmd("go movetime " + to_string(fixed_time_ms));
@@ -480,6 +491,10 @@ void Engine::send_move_and_clocks_to_engine(const string &move, const string &st
    {
       if (fixed_time_ms == 0)
       {
+         int64_t engine_clock_ms = clocks_ms[turn_4pc];
+         int prev_turn = options.fourplayerchess ? ((turn_4pc + 3) % 4) : ((turn_4pc + 1) % 2);
+         int64_t opp_clock_ms = clocks_ms[prev_turn];
+
          send_engine_cmd("time " + to_string(engine_clock_ms / 10));
          send_engine_cmd("otim " + to_string(opp_clock_ms / 10));
       }
