@@ -700,7 +700,7 @@ int parse_cmd_line_options(int argc, char* argv[])
    {
       po::options_description desc("Command line options");
       desc.add_options()
-         ("help",      "print help message")
+         ("help",       "print help message")
          ("e1",         po::value<string>(&options.engine_file_name_1), "first engine's file name")
          ("e2",         po::value<string>(&options.engine_file_name_2), "second engine's file name")
          ("x1",         "first engine uses xboard protocol. (UCI is the default protocol.)")
@@ -727,6 +727,7 @@ int parse_cmd_line_options(int argc, char* argv[])
          ("fens",       po::value<string>(&options.fens_filename), "file containing FENs for opening positions (one FEN per line)")
          ("variant",    po::value<string>(&options.variant), "variant name")
          ("4pc",        "enable 4 player chess (teams) mode")
+         ("legacy-clocks", "use legacy 2-clock system instead of independent 4-player clocks")
          ("continue",   "continue match if error occurs (e.g. illegal move)")
          ("pmoves",     "print out all moves")
          ("pgn",        po::value<string>(&options.pgn_filename), "save games in PGN format to specified file name\n(if file exists it will be overwritten)")
@@ -756,6 +757,7 @@ int parse_cmd_line_options(int argc, char* argv[])
       options.continue_on_error = (var_map.count("continue") != 0);
       options.print_moves = (var_map.count("pmoves") != 0);
       options.fourplayerchess = (var_map.count("4pc") != 0);
+      options.legacy_clocks = (var_map.count("legacy-clocks") != 0);
       options.early_win = (var_map.count("earlywin") != 0);
       options.early_draw = (var_map.count("earlydraw") != 0);
       

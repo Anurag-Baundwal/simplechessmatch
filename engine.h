@@ -43,6 +43,14 @@ enum player_color
    BLACK
 };
 
+enum player_color_4pc
+{
+   RED,
+   BLUE,
+   YELLOW,
+   GREEN
+};
+
 enum engine_number
 {
    FIRST,
@@ -54,6 +62,7 @@ void lstrip(string &s);
 string get_first_token(const string &s, size_t pos);
 vector<string> get_tokens(const string &s);
 player_color get_color_to_move_from_fen(const string &fen);
+player_color_4pc get_color_4pc_to_move_from_fen(const string &fen);
 void convert_to_lowercase(const string &input_str, string &output_str);
 
 class Engine
@@ -101,7 +110,7 @@ public:
    int wait_for_ready(bool check_output);
    int engine_new_game_setup(player_color color, player_color turn, int64_t start_time_ms, int64_t inc_time_ms, int64_t fixed_time_ms, const string &fen, const string &variant);
    void engine_new_game_start(int64_t start_time_ms, int64_t inc_time_ms, int64_t fixed_time_ms);
-   void send_move_and_clocks_to_engine(const string &move, const string &startfen, const string &movelist, int64_t engine_clock_ms, int64_t opp_clock_ms, int64_t inc_ms, int64_t fixed_time_ms);
+   void send_move_and_clocks_to_engine(const string &move, const string &startfen, const string &movelist, int64_t engine_clock_ms, int64_t opp_clock_ms, int64_t rtime, int64_t bltime, int64_t ytime, int64_t gtime, int64_t inc_ms, int64_t fixed_time_ms);
    void send_result_to_engine(game_result result);
    bool is_running(void);
    void force_exit(void);
@@ -143,6 +152,7 @@ struct options_info
    bool pgn4_format;
    bool early_win;
    bool early_draw;
+   bool legacy_clocks;
    uint draw_score;
    uint draw_moves;
    uint tc_ms;
